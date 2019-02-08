@@ -8,15 +8,115 @@
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/of_device.h>
-#include <drivers/video/fbdev/waveshare/epaper_2_7_inch.h>
- 
+
+/* Display resolution */
+#define EPD_WIDTH 176
+#define EPD_HEIGHT 264
+#define EPD_NUM_PIXELS (EPD_WIDTH * EPD_WIDTH)
+
+/* SPI commands */
+#define PANEL_SETTING 0x00
+#define POWER_SETTING 0x01
+#define POWER_OFF 0x02
+#define POWER_OFF_SEQUENCE_SETTING 0x03
+#define POWER_ON 0x04
+#define POWER_ON_MEASURE 0x05
+#define BOOSTER_SOFT_START 0x06
+#define DEEP_SLEEP 0x07
+#define DATA_START_TRANSMISSION_1 0x10
+#define DATA_STOP 0x11
+#define DISPLAY_REFRESH 0x12
+#define DATA_START_TRANSMISSION_2 0x13
+#define PARTIAL_DATA_START_TRANSMISSION_1 0x14
+#define PARTIAL_DATA_START_TRANSMISSION_2 0x15
+#define PARTIAL_DISPLAY_REFRESH 0x16
+#define LUT_FOR_VCOM 0x20
+#define LUT_WHITE_TO_WHITE 0x21
+#define LUT_BLACK_TO_WHITE 0x22
+#define LUT_WHITE_TO_BLACK 0x23
+#define LUT_BLACK_TO_BLACK 0x24
+#define PLL_CONTROL 0x30
+#define TEMPERATURE_SENSOR_COMMAND 0x40
+#define TEMPERATURE_SENSOR_CALIBRATION 0x41
+#define TEMPERATURE_SENSOR_WRITE 0x42
+#define TEMPERATURE_SENSOR_READ 0x43
+#define VCOM_AND_DATA_INTERVAL_SETTING 0x50
+#define LOW_POWER_DETECTION 0x51
+#define TCON_SETTING 0x60
+#define TCON_RESOLUTION 0x61
+#define SOURCE_AND_GATE_START_SETTING 0x62
+#define GET_STATUS 0x71
+#define AUTO_MEASURE_VCOM 0x80
+#define VCOM_VALUE 0x81
+#define VCM_DC_SETTING_REGISTER 0x82
+#define PROGRAM_MODE 0xA0
+#define ACTIVE_PROGRAM 0xA1
+#define READ_OTP_DATA 0xA2
+
+/*
+
+TODO:
+- Proper init
+- Proper shutdown
+- Map physical memory for the mmapping
+- override the mmap operation
+- clear op
+- suspend
+- refresh timer
+
+*/
+
+struct epaper_27inch_par {
+	spinlock_t lock;
+};
+
+static const struct fb_fix_screeninfo epaper_27inch_fix_screeninfo = {
+	.visual = FB_VISUAL_MONO01,
+	.type = FB_TYPE_PACKED_PIXELS,
+	.id = "Waveshare 2.7 inch ePaper display",
+	.line_length = EPD_WIDTH,
+};
+
 static int epaper_27inch_probe(struct platform_device *op)
 {
+	struct fb_info *info;
+	struct epaper_27inch_par *par;
+	int err;
+
+	info = framebuffer_alloc(sizeof(struct epaper_27inch_par), &op->dev);
+	err = -ENOMEM;
+	if (!info)
+		goto out_err;
+
+	info->fix = epaper_27inch_fix_screeninfo;
+
+	par = info->par;
+	spin_lock_init(&par->lock);
+
+	err = register_framebuffer(info);
+	if (err < 0)
+		goto out_dealloc_cmap;
+
+	dev_set_drvdata(&op->dev, info);
+
 	return 0;
+
+out_dealloc_cmap:
+	fb_dealloc_cmap(&info->cmap);
+	framebuffer_release(info);
+
+out_err:
+	return err;
 }
 
 static int epaper_27inch_remove(struct platform_device *op)
 {
+	struct fb_info *info = dev_get_drvdata(&op->dev);
+
+	unregister_framebuffer(info);
+	fb_dealloc_cmap(&info->cmap);
+
+	framebuffer_release(info);
 	return 0;
 }
 
