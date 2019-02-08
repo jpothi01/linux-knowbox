@@ -2523,3 +2523,12 @@ config FB_RPISENSE
 
 	help
 	  This is the framebuffer driver for the Raspberry Pi Sense HAT
+
+config FB_EPAPER_27INCH
+	tristate "Waveshare 2.7 ePaper Display Framebuffer"
+	depends on FB
+	select FB_CFB_FILLRECT
+	select FB_CFB_COPYAREA
+
+	help
+	  This is a framebuffer display for the Waveshare 2.7 ePaper Display
