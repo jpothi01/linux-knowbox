@@ -7,6 +7,8 @@
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
+#include <linux/of_gpio.h>
 #include <linux/spi/spi.h>
 #include <linux/of_device.h>
 
@@ -73,7 +75,10 @@ TODO:
 */
 
 struct epaper_27inch_spi_private {
-
+	int gpio_rst;
+	int gpio_busy;
+	int gpio_dc;
+	int gpio_cs;
 };
 
 
@@ -82,13 +87,11 @@ int epaper_27inch_spi_send_command(struct spi_device *spi, char command)
 	/* TODO: pull the GPIO low */
 
 	char tx = command;
-	char rx;
 
 	struct spi_transfer xfers[] = {
 		{
 			.len = 1,
 			.tx_buf = &tx,
-			.rx_buf = &rx,
 		},
 	};
 
@@ -98,14 +101,46 @@ int epaper_27inch_spi_send_command(struct spi_device *spi, char command)
 static int epaper_27inch_spi_probe(struct spi_device *spi) {
 	struct epaper_27inch_spi_private *prv;
 	int err;
+	struct device_node *of_node = spi->dev.of_node;
 
-	dev_info(&spi->dev, "Probing the epaper SPI\n");
+	printk(KERN_INFO "Probing the epaper SPI\n");
 
 	prv = devm_kzalloc(&spi->dev, sizeof(*prv), GFP_KERNEL);
 	if (!prv) {
 		err = -ENOMEM;
 		goto exit_err;
 	}
+
+	prv->gpio_rst = of_get_named_gpio(of_node, "gpio-rst", 0);
+	if (!gpio_is_valid(prv->gpio_rst)) {
+		dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_rst);
+		err = -ENOMEM; // TODO: actual error
+		goto exit_free_mem;
+	}
+
+	prv->gpio_busy = of_get_named_gpio(of_node, "gpio-busy", 0);
+	if (!gpio_is_valid(prv->gpio_busy)) {
+		dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_busy);
+		err = -ENOMEM; // TODO: actual error
+		goto exit_free_mem;
+	}
+
+	prv->gpio_cs = of_get_named_gpio(of_node, "gpio-cs", 0);
+	if (!gpio_is_valid(prv->gpio_cs)) {
+		dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_cs);
+		err = -ENOMEM; // TODO: actual error
+		goto exit_free_mem;
+	}
+
+	prv->gpio_dc = of_get_named_gpio(of_node, "gpio-dc", 0);
+	if (!gpio_is_valid(prv->gpio_dc)) {
+		dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_dc);
+		err = -ENOMEM; // TODO: actual error
+		goto exit_free_mem;
+	}
+
+	dev_info(&spi->dev, "Got GPIOs: %d, %d, %d, %d", 
+		prv->gpio_rst, prv->gpio_busy, prv->gpio_cs, prv->gpio_dc);
 
 	/*
 	TODO: command/data GPIO
@@ -120,128 +155,172 @@ static int epaper_27inch_spi_probe(struct spi_device *spi) {
 	spi_set_drvdata(spi, prv);
 	return 0;
 
+exit_free_mem:
+	kfree(prv);
+	return err;
+
 exit_err:
 	return err;
 }
 
 static int epaper_27inch_spi_remove(struct spi_device *spi) {
+	struct epaper_27inch_spi_private *prv = spi_get_drvdata(spi);
+	kfree(prv);
 	return 0;
 }
 
 /* SPI driver */
+
+static const struct of_device_id epaper_27inch_spi_of_match[] = {
+	{ .compatible = "waveshare,epaper_27inch", },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, epaper_27inch_spi_of_match);
+
+static const struct spi_device_id epaper_27inch_spi_id_table[] = {
+	{ "epaper_27inch", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(spi, epaper_27inch_spi_id_table);
+
 static struct spi_driver epaper_27inch_spi_driver = {
 	.driver  = {
-		.name   = "epaper_27inch_spi",
+		.name   = "epaper_27inch",
 		.owner  = THIS_MODULE,
+		.of_match_table = epaper_27inch_spi_of_match
 	},
+	.id_table = epaper_27inch_spi_id_table,
 	.probe   = epaper_27inch_spi_probe,
 	.remove  = epaper_27inch_spi_remove,
 };
 
 /* Framebuffer driver */
 
-struct epaper_27inch_par {
-	spinlock_t lock;
-};
+// struct epaper_27inch_par {
+// 	spinlock_t lock;
+// };
 
-static const struct fb_fix_screeninfo epaper_27inch_fix_screeninfo = {
-	.visual = FB_VISUAL_MONO01,
-	.type = FB_TYPE_PACKED_PIXELS,
-	.id = "2.7 inch EPD",
-	.line_length = EPD_WIDTH,
-};
+// static const struct fb_fix_screeninfo epaper_27inch_fix_screeninfo = {
+// 	.visual = FB_VISUAL_MONO01,
+// 	.type = FB_TYPE_PACKED_PIXELS,
+// 	.id = "2.7 inch EPD",
+// 	.line_length = EPD_WIDTH,
+// 	.xpanstep =	0,
+// 	.ypanstep =	0,
+// 	.ywrapstep =	0,
+// 	.accel =	FB_ACCEL_NONE,
+// };
 
-static int epaper_27inch_probe(struct platform_device *op)
-{
-	struct fb_info *info;
-	struct epaper_27inch_par *par;
-	int err;
+// static const struct fb_var_screeninfo epaper_27inch_var_screeninfo = {
+// 	.xres		= EPD_WIDTH,
+// 	.yres		= EPD_HEIGHT,
+// 	.xres_virtual	= EPD_WIDTH,
+// 	.yres_virtual	= EPD_HEIGHT,
+// 	.bits_per_pixel	= 1,
+// 	.nonstd		= 1,
+// };
 
-	info = framebuffer_alloc(sizeof(struct epaper_27inch_par), &op->dev);
-	err = -ENOMEM;
-	if (!info)
-		goto out_err;
+// static int epaper_27inch_probe(struct platform_device *op)
+// {
+// 	struct fb_info *info;
+// 	struct epaper_27inch_par *par;
+// 	int err;
 
-	info->fix = epaper_27inch_fix_screeninfo;
+// 	printk(KERN_INFO "In epaper_27inch_probe\n");
 
-	par = info->par;
-	spin_lock_init(&par->lock);
+// 	info = framebuffer_alloc(sizeof(struct epaper_27inch_par), &op->dev);
+// 	err = -ENOMEM;
+// 	if (!info)
+// 		goto out_err;
 
-	err = register_framebuffer(info);
-	if (err < 0)
-		goto out_dealloc_cmap;
+// 	info->fix = epaper_27inch_fix_screeninfo;
+// 	info->var = epaper_27inch_var_screeninfo;
 
-	dev_set_drvdata(&op->dev, info);
+// 	par = info->par;
+// 	spin_lock_init(&par->lock);
 
-	return 0;
+// 	err = register_framebuffer(info);
+// 	if (err < 0)
+// 		goto out_dealloc_cmap;
 
-out_dealloc_cmap:
-	fb_dealloc_cmap(&info->cmap);
-	framebuffer_release(info);
+// 	dev_set_drvdata(&op->dev, info);
 
-out_err:
-	return err;
-}
+// 	return 0;
 
-static int epaper_27inch_remove(struct platform_device *op)
-{
-	struct fb_info *info = dev_get_drvdata(&op->dev);
+// out_dealloc_cmap:
+// 	fb_dealloc_cmap(&info->cmap);
+// 	framebuffer_release(info);
 
-	unregister_framebuffer(info);
-	fb_dealloc_cmap(&info->cmap);
+// out_err:
+// 	return err;
+// }
 
-	framebuffer_release(info);
-	return 0;
-}
+// static int epaper_27inch_remove(struct platform_device *op)
+// {
+// 	struct fb_info *info = dev_get_drvdata(&op->dev);
 
-static const struct of_device_id epaper_27inch_match[] = {
-	{
-		.name = "waveshare,epaper-2-7-inch",
-	},
-	{},
-};
-MODULE_DEVICE_TABLE(of, epaper_27inch_match);
+// 	unregister_framebuffer(info);
+// 	fb_dealloc_cmap(&info->cmap);
 
-static struct platform_driver epaper_27inch_driver = {
-	.driver = {
-		.name = "epaper_27inch",
-		.of_match_table = epaper_27inch_match,
-	},
-	.probe		= epaper_27inch_probe,
-	.remove		= epaper_27inch_remove,
-};
+// 	framebuffer_release(info);
+// 	return 0;
+// }
 
-static int __init epaper_27inch_init(void)
-{
-	int err;
-	if (fb_get_options("epaper_27inch", NULL)) {
-		err = -ENODEV;
+// static const struct of_device_id epaper_27inch_match[] = {
+// 	{
+// 		.name = "waveshare,epaper-2-7-inch",
+// 	},
+// 	{},
+// };
+// MODULE_DEVICE_TABLE(of, epaper_27inch_match);
 
-	}
+// static struct platform_driver epaper_27inch_driver = {
+// 	.driver = {
+// 		.name = "epaper_27inch",
+// 		.of_match_table = epaper_27inch_match,
+// 	},
+// 	.probe		= epaper_27inch_probe,
+// 	.remove		= epaper_27inch_remove,
+// };
 
-	err = spi_register_driver(&epaper_27inch_spi_driver);
-	if (err)
-		goto exit_err;
+// static int __init epaper_27inch_init(void)
+// {
+// 	int err;
 
-	err = platform_driver_register(&epaper_27inch_driver);
-	if (err)
-		goto exit_err;
+// 	printk(KERN_INFO "In epaper_27inch_init\n");
+// 	if (fb_get_options("epaper_27inch", NULL)) {
+// 		err = -ENODEV;
+// 		printk(KERN_INFO "fb_get_options failed\n");
+// 		goto exit_err;
+// 	}
 
-	return 0;
-exit_err:
-	return err;
-}
+// 	err = spi_register_driver(&epaper_27inch_spi_driver);
+// 	if (err) {
+// 		printk(KERN_INFO "spi_register_driver failed\n");
+// 		goto exit_err;
+// 	}
 
-static void __exit epaper_27inch_exit(void)
-{
-	spi_unregister_driver(&epaper_27inch_spi_driver);
-	platform_driver_unregister(&epaper_27inch_driver);
-}
+// 	err = platform_driver_register(&epaper_27inch_driver);
+// 	if (err) {
+// 		printk(KERN_INFO "platform_driver_register failed\n");
+// 		goto exit_err;
+// 	}
 
-module_init(epaper_27inch_init);
-module_exit(epaper_27inch_exit);
+// 	return 0;
+// exit_err:
+// 	return err;
+// }
 
-MODULE_DESCRIPTION("Framebuffer driver for the Waveshare 2.7 inch ePaper display for the raspberry PI");
+// static void __exit epaper_27inch_exit(void)
+// {
+// 	printk(KERN_INFO "In epaper_27inch_exit\n");
+// 	spi_unregister_driver(&epaper_27inch_spi_driver);
+// 	platform_driver_unregister(&epaper_27inch_driver);
+// }
+
+module_spi_driver(epaper_27inch_spi_driver);
+
+MODULE_DESCRIPTION("Framebuffer driver for the Waveshare 2.7 inch ePaper display");
 MODULE_AUTHOR("John Pothier <john.pothier@outlook.com>");
 MODULE_VERSION("1.0");
 MODULE_LICENSE("GPL");

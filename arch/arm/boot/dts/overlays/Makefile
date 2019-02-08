@@ -151,6 +151,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	vc4-kms-kippah-7inch.dtbo \
 	vc4-kms-v3d.dtbo \
 	vga666.dtbo \
+	waveshare-epd-2in7.dtbo \
 	w1-gpio.dtbo \
 	w1-gpio-pullup.dtbo \
 	wittypi.dtbo
