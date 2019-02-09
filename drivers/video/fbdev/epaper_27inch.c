@@ -111,36 +111,39 @@ static int epaper_27inch_spi_probe(struct spi_device *spi) {
 		goto exit_err;
 	}
 
-	prv->gpio_rst = of_get_named_gpio(of_node, "gpio-rst", 0);
+//	prv->gpio_rst = of_get_named_gpio(of_node, "gpio-rst", 0);
+	prv->gpio_rst = 17;
 	if (!gpio_is_valid(prv->gpio_rst)) {
-		dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_rst);
+		dev_err(&spi->dev, "Unable to request reset GPIO %d\n", prv->gpio_rst);
 		err = -ENOMEM; // TODO: actual error
 		goto exit_free_mem;
 	}
 
-	prv->gpio_busy = of_get_named_gpio(of_node, "gpio-busy", 0);
+//	prv->gpio_busy = of_get_named_gpio(of_node, "gpio-busy", 0);
+	prv->gpio_busy = 24;
 	if (!gpio_is_valid(prv->gpio_busy)) {
-		dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_busy);
+		dev_err(&spi->dev, "Unable to request busy GPIO %d\n", prv->gpio_busy);
 		err = -ENOMEM; // TODO: actual error
 		goto exit_free_mem;
 	}
 
-	prv->gpio_cs = of_get_named_gpio(of_node, "gpio-cs", 0);
-	if (!gpio_is_valid(prv->gpio_cs)) {
-		dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_cs);
-		err = -ENOMEM; // TODO: actual error
-		goto exit_free_mem;
-	}
+	// prv->gpio_cs = of_get_named_gpio(of_node, "gpio-cs", 0);
+	// if (!gpio_is_valid(prv->gpio_cs)) {
+	// 	dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_cs);
+	// 	err = -ENOMEM; // TODO: actual error
+	// 	goto exit_free_mem;
+	// }
 
-	prv->gpio_dc = of_get_named_gpio(of_node, "gpio-dc", 0);
+//	prv->gpio_dc = of_get_named_gpio(of_node, "gpio-dc", 0);
+	prv->gpio_dc = 25;
 	if (!gpio_is_valid(prv->gpio_dc)) {
-		dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_dc);
+		dev_err(&spi->dev, "Unable to request DC GPIO %d\n", prv->gpio_dc);
 		err = -ENOMEM; // TODO: actual error
 		goto exit_free_mem;
 	}
 
-	dev_info(&spi->dev, "Got GPIOs: %d, %d, %d, %d", 
-		prv->gpio_rst, prv->gpio_busy, prv->gpio_cs, prv->gpio_dc);
+	dev_warn(&spi->dev, "Got GPIOs: %d, %d, %d\n", 
+		prv->gpio_rst, prv->gpio_busy, prv->gpio_dc);
 
 	/*
 	TODO: command/data GPIO
