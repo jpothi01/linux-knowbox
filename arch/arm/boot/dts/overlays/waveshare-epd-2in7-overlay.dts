@@ -32,16 +32,6 @@
 	};
 
 	fragment@3 {
-		target = <&gpio>;
-		__overlay__ {
-			epaper_27inch_pins: epaper_27inch_pins {
-				brcm,pins = <25 8 17 24>; /* DC, CS, RST, BUSY */
-				brcm,function = <1 1 1 0>; /* out out out in */
-			};
-		};
-	};
-
-	fragment@4 {
 		target = <&spi0>;
 		__overlay__ {
 			/* needed to avoid dtc warning */
@@ -52,6 +42,9 @@
 				compatible = "waveshare,epaper_27inch";
 				spi-max-frequency = <2000000>;
 				reg = <0>;
+				gpio-dc = <&gpio 25 1>;
+				gpio-rst = <&gpio 17 1>;
+				gpio-busy = <&gpio 24 0>;
 			};
 		};
 	};

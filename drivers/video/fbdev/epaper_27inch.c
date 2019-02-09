@@ -18,48 +18,51 @@
 #define EPD_NUM_PIXELS (EPD_WIDTH * EPD_WIDTH)
 
 /* SPI commands */
-#define PANEL_SETTING 0x00
-#define POWER_SETTING 0x01
-#define POWER_OFF 0x02
-#define POWER_OFF_SEQUENCE_SETTING 0x03
-#define POWER_ON 0x04
-#define POWER_ON_MEASURE 0x05
-#define BOOSTER_SOFT_START 0x06
-#define DEEP_SLEEP 0x07
-#define DATA_START_TRANSMISSION_1 0x10
-#define DATA_STOP 0x11
-#define DISPLAY_REFRESH 0x12
-#define DATA_START_TRANSMISSION_2 0x13
-#define PARTIAL_DATA_START_TRANSMISSION_1 0x14
-#define PARTIAL_DATA_START_TRANSMISSION_2 0x15
-#define PARTIAL_DISPLAY_REFRESH 0x16
-#define LUT_FOR_VCOM 0x20
-#define LUT_WHITE_TO_WHITE 0x21
-#define LUT_BLACK_TO_WHITE 0x22
-#define LUT_WHITE_TO_BLACK 0x23
-#define LUT_BLACK_TO_BLACK 0x24
-#define PLL_CONTROL 0x30
-#define TEMPERATURE_SENSOR_COMMAND 0x40
-#define TEMPERATURE_SENSOR_CALIBRATION 0x41
-#define TEMPERATURE_SENSOR_WRITE 0x42
-#define TEMPERATURE_SENSOR_READ 0x43
-#define VCOM_AND_DATA_INTERVAL_SETTING 0x50
-#define LOW_POWER_DETECTION 0x51
-#define TCON_SETTING 0x60
-#define TCON_RESOLUTION 0x61
-#define SOURCE_AND_GATE_START_SETTING 0x62
-#define GET_STATUS 0x71
-#define AUTO_MEASURE_VCOM 0x80
-#define VCOM_VALUE 0x81
-#define VCM_DC_SETTING_REGISTER 0x82
-#define PROGRAM_MODE 0xA0
-#define ACTIVE_PROGRAM 0xA1
-#define READ_OTP_DATA 0xA2
+#define COMMAND_PANEL_SETTING 0x00
+#define COMMAND_POWER_SETTING 0x01
+#define COMMAND_POWER_OFF 0x02
+#define COMMAND_POWER_OFF_SEQUENCE_SETTING 0x03
+#define COMMAND_POWER_ON 0x04
+#define COMMAND_POWER_ON_MEASURE 0x05
+#define COMMAND_BOOSTER_SOFT_START 0x06
+#define COMMAND_DEEP_SLEEP 0x07
+#define COMMAND_DATA_START_TRANSMISSION_1 0x10
+#define COMMAND_DATA_STOP 0x11
+#define COMMAND_DISPLAY_REFRESH 0x12
+#define COMMAND_DATA_START_TRANSMISSION_2 0x13
+#define COMMAND_PARTIAL_DATA_START_TRANSMISSION_1 0x14
+#define COMMAND_PARTIAL_DATA_START_TRANSMISSION_2 0x15
+#define COMMAND_PARTIAL_DISPLAY_REFRESH 0x16
+#define COMMAND_LUT_FOR_VCOM 0x20
+#define COMMAND_LUT_WHITE_TO_WHITE 0x21
+#define COMMAND_LUT_BLACK_TO_WHITE 0x22
+#define COMMAND_LUT_WHITE_TO_BLACK 0x23
+#define COMMAND_LUT_BLACK_TO_BLACK 0x24
+#define COMMAND_PLL_CONTROL 0x30
+#define COMMAND_TEMPERATURE_SENSOR_COMMAND 0x40
+#define COMMAND_TEMPERATURE_SENSOR_CALIBRATION 0x41
+#define COMMAND_TEMPERATURE_SENSOR_WRITE 0x42
+#define COMMAND_TEMPERATURE_SENSOR_READ 0x43
+#define COMMAND_VCOM_AND_DATA_INTERVAL_SETTING 0x50
+#define COMMAND_LOW_POWER_DETECTION 0x51
+#define COMMAND_TCON_SETTING 0x60
+#define COMMAND_TCON_RESOLUTION 0x61
+#define COMMAND_SOURCE_AND_GATE_START_SETTING 0x62
+#define COMMAND_GET_STATUS 0x71
+#define COMMAND_AUTO_MEASURE_VCOM 0x80
+#define COMMAND_VCOM_VALUE 0x81
+#define COMMAND_VCM_DC_SETTING_REGISTER 0x82
+#define COMMAND_PROGRAM_MODE 0xA0
+#define COMMAND_ACTIVE_PROGRAM 0xA1
+#define COMMAND_READ_OTP_DATA 0xA2
 
 #define RST_Pin 17
 #define DC_PIN 25
 #define CS_PIN 8
 #define BUSY_PIN 24
+
+#define DC_COMMAND 0
+#define DC_DATA 1
 
 /*
 
@@ -75,27 +78,149 @@ TODO:
 */
 
 struct epaper_27inch_spi_private {
-	int gpio_rst;
+	int gpio_rst_n;
 	int gpio_busy;
 	int gpio_dc;
 	int gpio_cs;
 };
 
-
-int epaper_27inch_spi_send_command(struct spi_device *spi, char command)
+static int epaper_27inch_spi_send_command(struct spi_device *spi, char command)
 {
-	/* TODO: pull the GPIO low */
-
-	char tx = command;
-
+	struct epaper_27inch_spi_private *prv;
 	struct spi_transfer xfers[] = {
 		{
 			.len = 1,
-			.tx_buf = &tx,
+			.tx_buf = &command,
 		},
 	};
 
+	prv = spi_get_drvdata(spi);
+	gpio_set_value(prv->gpio_dc, DC_COMMAND);
+
 	return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+}
+
+static int epaper_27inch_spi_send_data(struct spi_device *spi, char* data, int data_size)
+{
+	struct epaper_27inch_spi_private *prv;
+	struct spi_transfer xfers[] = {
+		{
+			.len = data_size,
+			.tx_buf = data,
+		},
+	};
+
+	prv = spi_get_drvdata(spi);
+	gpio_set_value(prv->gpio_dc, DC_DATA);
+
+
+	return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+}
+
+static int epaper_27inch_spi_send_command_with_data(struct spi_device *spi, char command, char* data, int data_size)
+{
+	int err;
+	err = epaper_27inch_spi_send_command(spi, command);
+	if (err) {
+		return err;
+	}
+
+	return epaper_27inch_spi_send_data(spi, data, data_size);
+}
+
+static void epaper_27inch_wait_until_idle(struct spi_device *spi) {
+	struct epaper_27inch_spi_private *prv;
+	prv = spi_get_drvdata(spi);
+
+	/* The reference implementation sends the GET_STATUS command while spinning
+	on the idle GPIO. Though it is unclear why, we will do that as well. */
+	while (gpio_get_value(prv->gpio_busy) == 0) {
+		epaper_27inch_spi_send_command(spi, COMMAND_GET_STATUS);
+		usleep_range(500, 1000);
+	}
+}
+
+static int epaper_27inch_clear(struct spi_device *spi) {
+	int i;
+	char pixel;
+	int err;
+
+	pixel = 0xff;
+
+	/* temp code */
+	err = epaper_27inch_spi_send_command(spi, COMMAND_DATA_START_TRANSMISSION_1);
+	if (err) {
+		return err;
+	}
+
+	for (i = 0; i < (EPD_WIDTH * EPD_HEIGHT) / 8; ++i) {
+		err = epaper_27inch_spi_send_data(spi, &pixel, 1);
+		if (err) {
+			return err;
+		}
+	}
+
+	err = epaper_27inch_spi_send_command(spi, COMMAND_DATA_START_TRANSMISSION_2);
+	if (err) {
+		return err;
+	}
+
+	for (i = 0; i < (EPD_WIDTH * EPD_HEIGHT) / 8; ++i) {
+		err = epaper_27inch_spi_send_data(spi, &pixel, 1);
+		if (err) {
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+static int epaper_27inch_sleep(struct spi_device *spi) {
+	struct epaper_27inch_spi_private *prv;
+
+	prv = spi_get_drvdata(spi);
+	return 0;
+}
+
+static void epaper_27inch_reset(struct spi_device *spi) {
+	int reset_delay;
+	struct epaper_27inch_spi_private *prv;
+
+	prv = spi_get_drvdata(spi);
+
+	/* This is the value used in the reference implementation */
+	reset_delay = 200;
+
+	gpio_set_value(prv->gpio_rst_n, 1);
+	msleep(reset_delay);
+	gpio_set_value(prv->gpio_rst_n, 0);
+	msleep(reset_delay);
+	gpio_set_value(prv->gpio_rst_n, 1);
+	msleep(reset_delay);
+}
+
+static int epaper_27inch_poweron(struct spi_device *spi) {
+	struct epaper_27inch_spi_private *prv;
+	prv = spi_get_drvdata(spi);
+	return 0;
+}
+
+static int epaper_27inch_configure_power(struct spi_device *spi) {
+	struct epaper_27inch_spi_private *prv;
+	prv = spi_get_drvdata(spi);
+
+	/* This sequence of black magic incantations is taken from the reference
+	implementation, all labeled "power optimization". */
+
+	epaper_27inch_wait_until_idle(spi);
+
+	return 0;
+}
+
+static int epaper_27inch_configure_panel(struct spi_device *spi) {
+	struct epaper_27inch_spi_private *prv;
+	prv = spi_get_drvdata(spi);
+	return 0;
 }
 
 static int epaper_27inch_spi_probe(struct spi_device *spi) {
@@ -111,51 +236,51 @@ static int epaper_27inch_spi_probe(struct spi_device *spi) {
 		goto exit_err;
 	}
 
-//	prv->gpio_rst = of_get_named_gpio(of_node, "gpio-rst", 0);
-	prv->gpio_rst = 17;
-	if (!gpio_is_valid(prv->gpio_rst)) {
-		dev_err(&spi->dev, "Unable to request reset GPIO %d\n", prv->gpio_rst);
+	prv->gpio_rst_n = of_get_named_gpio(of_node, "gpio-rst", 0);
+	if (!gpio_is_valid(prv->gpio_rst_n)) {
+		dev_err(&spi->dev, "Unable to request reset GPIO %d\n", prv->gpio_rst_n);
 		err = -ENOMEM; // TODO: actual error
 		goto exit_free_mem;
 	}
 
-//	prv->gpio_busy = of_get_named_gpio(of_node, "gpio-busy", 0);
-	prv->gpio_busy = 24;
+	prv->gpio_busy = of_get_named_gpio(of_node, "gpio-busy", 0);
 	if (!gpio_is_valid(prv->gpio_busy)) {
 		dev_err(&spi->dev, "Unable to request busy GPIO %d\n", prv->gpio_busy);
 		err = -ENOMEM; // TODO: actual error
 		goto exit_free_mem;
 	}
 
-	// prv->gpio_cs = of_get_named_gpio(of_node, "gpio-cs", 0);
-	// if (!gpio_is_valid(prv->gpio_cs)) {
-	// 	dev_err(&spi->dev, "Unable to request GPIO %d\n", prv->gpio_cs);
-	// 	err = -ENOMEM; // TODO: actual error
-	// 	goto exit_free_mem;
-	// }
-
-//	prv->gpio_dc = of_get_named_gpio(of_node, "gpio-dc", 0);
-	prv->gpio_dc = 25;
+	prv->gpio_dc = of_get_named_gpio(of_node, "gpio-dc", 0);
 	if (!gpio_is_valid(prv->gpio_dc)) {
 		dev_err(&spi->dev, "Unable to request DC GPIO %d\n", prv->gpio_dc);
 		err = -ENOMEM; // TODO: actual error
 		goto exit_free_mem;
 	}
 
-	dev_warn(&spi->dev, "Got GPIOs: %d, %d, %d\n", 
-		prv->gpio_rst, prv->gpio_busy, prv->gpio_dc);
-
-	/*
-	TODO: command/data GPIO
-
-	err = gpio_request_one(prv->gpio_int, GPIOF_OUT, dev_name(prv->dev));
-	if (err) {
-		dev_err(prv->dev, "Unable to request GPIO %d\n", prv->gpio_int);
-		goto exit_free_mem;
-	}
-	*/
-
 	spi_set_drvdata(spi, prv);
+
+	epaper_27inch_reset(spi);
+	
+	err = epaper_27inch_configure_power(spi);
+	if (err) {
+		goto exit_err;
+	}
+
+	err = epaper_27inch_poweron(spi);
+	if (err) {
+		goto exit_err;
+	}
+
+	err = epaper_27inch_configure_panel(spi);
+	if (err) {
+		goto exit_err;
+	}
+
+	err = epaper_27inch_clear(spi);
+	if (err) {
+		goto exit_err;
+	}
+
 	return 0;
 
 exit_free_mem:
