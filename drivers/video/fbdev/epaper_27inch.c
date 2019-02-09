@@ -118,7 +118,7 @@ static char lut_bw[42] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static char lut_bb[42] = {
+static char lut_wb[42] = {
     0x80, 0x08, 0x00, 0x00, 0x00, 0x02,
     0x90, 0x28, 0x28, 0x00, 0x00, 0x01,
     0x80, 0x14, 0x00, 0x00, 0x00, 0x01,
@@ -128,7 +128,7 @@ static char lut_bb[42] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static char lut_wb[42] = {
+static char lut_bb[42] = {
     0x80, 0x08, 0x00, 0x00, 0x00, 0x02,
     0x90, 0x28, 0x28, 0x00, 0x00, 0x01,
     0x80, 0x14, 0x00, 0x00, 0x00, 0x01,
@@ -351,9 +351,20 @@ static int epaper_27inch_configure_panel(struct spi_device *spi) {
 
 static int epaper_27inch_set_lut(struct spi_device *spi) {
 	struct epaper_27inch_spi_private *prv;
+
 	prv = spi_get_drvdata(spi);
 
-	/* TODO */
+	epaper_27inch_spi_send_command(spi, COMMAND_LUT_FOR_VCOM);
+    epaper_27inch_spi_send_data(spi, lut_vcom_dc, 44);
+
+    epaper_27inch_spi_send_command(spi, COMMAND_LUT_WHITE_TO_WHITE);
+    epaper_27inch_spi_send_data(spi, lut_ww, 42);
+    epaper_27inch_spi_send_command(spi, COMMAND_LUT_BLACK_TO_WHITE);
+    epaper_27inch_spi_send_data(spi, lut_bw, 42);
+    epaper_27inch_spi_send_command(spi, COMMAND_LUT_WHITE_TO_BLACK);
+    epaper_27inch_spi_send_data(spi, lut_wb, 42);
+    epaper_27inch_spi_send_command(spi, COMMAND_LUT_BLACK_TO_BLACK);
+    epaper_27inch_spi_send_data(spi, lut_bb, 42);
 
 	return 0;
 }
