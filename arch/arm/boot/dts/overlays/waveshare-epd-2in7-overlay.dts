@@ -34,7 +34,6 @@
 	fragment@3 {
 		target = <&spi0>;
 		__overlay__ {
-			/* needed to avoid dtc warning */
 			#address-cells = <1>;
 			#size-cells = <0>;
 
