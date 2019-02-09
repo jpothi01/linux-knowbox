@@ -56,6 +56,8 @@
 #define COMMAND_ACTIVE_PROGRAM 0xA1
 #define COMMAND_READ_OTP_DATA 0xA2
 
+#define DEEP_SLEEP_MAGIC 0xA5
+
 #define RST_Pin 17
 #define DC_PIN 25
 #define CS_PIN 8
@@ -82,6 +84,58 @@ struct epaper_27inch_spi_private {
 	int gpio_busy;
 	int gpio_dc;
 	int gpio_cs;
+};
+
+/* Look-up tables. */
+static char lut_vcom_dc[44] = {
+    0x00, 0x00,
+    0x00, 0x08, 0x00, 0x00, 0x00, 0x02,
+    0x60, 0x28, 0x28, 0x00, 0x00, 0x01,
+    0x00, 0x14, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x12, 0x12, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static char lut_ww[42] = {
+    0x40, 0x08, 0x00, 0x00, 0x00, 0x02,
+    0x90, 0x28, 0x28, 0x00, 0x00, 0x01,
+    0x40, 0x14, 0x00, 0x00, 0x00, 0x01,
+    0xA0, 0x12, 0x12, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static char lut_bw[42] = {
+    0x40, 0x08, 0x00, 0x00, 0x00, 0x02,
+    0x90, 0x28, 0x28, 0x00, 0x00, 0x01,
+    0x40, 0x14, 0x00, 0x00, 0x00, 0x01,
+    0xA0, 0x12, 0x12, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static char lut_bb[42] = {
+    0x80, 0x08, 0x00, 0x00, 0x00, 0x02,
+    0x90, 0x28, 0x28, 0x00, 0x00, 0x01,
+    0x80, 0x14, 0x00, 0x00, 0x00, 0x01,
+    0x50, 0x12, 0x12, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static char lut_wb[42] = {
+    0x80, 0x08, 0x00, 0x00, 0x00, 0x02,
+    0x90, 0x28, 0x28, 0x00, 0x00, 0x01,
+    0x80, 0x14, 0x00, 0x00, 0x00, 0x01,
+    0x50, 0x12, 0x12, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 static int epaper_27inch_spi_send_command(struct spi_device *spi, char command)
@@ -115,6 +169,10 @@ static int epaper_27inch_spi_send_data(struct spi_device *spi, char* data, int d
 
 
 	return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+}
+
+static int epaper_27inch_spi_send_data_single(struct spi_device *spi, char data) {
+	return epaper_27inch_spi_send_data(spi, &data, 1);
 }
 
 static int epaper_27inch_spi_send_command_with_data(struct spi_device *spi, char command, char* data, int data_size)
@@ -179,6 +237,14 @@ static int epaper_27inch_sleep(struct spi_device *spi) {
 	struct epaper_27inch_spi_private *prv;
 
 	prv = spi_get_drvdata(spi);
+
+	epaper_27inch_spi_send_command(spi, COMMAND_VCOM_AND_DATA_INTERVAL_SETTING);
+	/* VBD = 0b11, DDX = 0b11, CDI = 0b0111 */
+	epaper_27inch_spi_send_data_single(spi, 0xf7);
+	epaper_27inch_spi_send_command(spi, COMMAND_POWER_OFF);
+	epaper_27inch_spi_send_command(spi, COMMAND_DEEP_SLEEP);
+	epaper_27inch_spi_send_data_single(spi, DEEP_SLEEP_MAGIC);
+
 	return 0;
 }
 
@@ -202,6 +268,10 @@ static void epaper_27inch_reset(struct spi_device *spi) {
 static int epaper_27inch_poweron(struct spi_device *spi) {
 	struct epaper_27inch_spi_private *prv;
 	prv = spi_get_drvdata(spi);
+
+	epaper_27inch_spi_send_command(spi, COMMAND_POWER_ON);
+	epaper_27inch_wait_until_idle(spi);
+
 	return 0;
 }
 
@@ -210,9 +280,55 @@ static int epaper_27inch_configure_power(struct spi_device *spi) {
 	prv = spi_get_drvdata(spi);
 
 	/* This sequence of black magic incantations is taken from the reference
-	implementation, all labeled "power optimization". */
+	implementation, which implements the flow chart found in section 8-2 of the
+	data sheet */
 
-	epaper_27inch_wait_until_idle(spi);
+	epaper_27inch_spi_send_command(spi, COMMAND_POWER_SETTING);
+
+	/* VDS_EN, VDG_EN */
+    epaper_27inch_spi_send_data_single(spi, 0x03);
+    /* VCOM_HV, VGHL_LV[1], VGHL_LV[0] */
+    epaper_27inch_spi_send_data_single(spi, 0x00);
+    /* VDH */
+    epaper_27inch_spi_send_data_single(spi, 0x2b);
+    /* VDL */
+    epaper_27inch_spi_send_data_single(spi, 0x2b);
+    /* VDHR */
+    epaper_27inch_spi_send_data_single(spi, 0x09);
+    epaper_27inch_spi_send_command(spi, COMMAND_BOOSTER_SOFT_START);
+    epaper_27inch_spi_send_data_single(spi, 0x07);
+    epaper_27inch_spi_send_data_single(spi, 0x07);
+    epaper_27inch_spi_send_data_single(spi, 0x17);
+    /* Power optimization */
+    epaper_27inch_spi_send_command(spi, 0xF8);
+    epaper_27inch_spi_send_data_single(spi, 0x60);
+    epaper_27inch_spi_send_data_single(spi, 0xA5);
+    /* Power optimization */
+    epaper_27inch_spi_send_command(spi, 0xF8);
+    epaper_27inch_spi_send_data_single(spi, 0x89);
+    epaper_27inch_spi_send_data_single(spi, 0xA5);
+    /* Power optimization */
+    epaper_27inch_spi_send_command(spi, 0xF8);
+    epaper_27inch_spi_send_data_single(spi, 0x90);
+    epaper_27inch_spi_send_data_single(spi, 0x00);
+    /* Power optimization */
+    epaper_27inch_spi_send_command(spi, 0xF8);
+    epaper_27inch_spi_send_data_single(spi, 0x93);
+    epaper_27inch_spi_send_data_single(spi, 0x2A);
+    /* Power optimization */
+    epaper_27inch_spi_send_command(spi, 0xF8);
+    epaper_27inch_spi_send_data_single(spi, 0xA0);
+    epaper_27inch_spi_send_data_single(spi, 0xA5);
+    /* Power optimization */
+    epaper_27inch_spi_send_command(spi, 0xF8);
+    epaper_27inch_spi_send_data_single(spi, 0xA1);
+    epaper_27inch_spi_send_data_single(spi, 0x00);
+    /* Power optimization */
+    epaper_27inch_spi_send_command(spi, 0xF8);
+    epaper_27inch_spi_send_data_single(spi, 0x73);
+    epaper_27inch_spi_send_data_single(spi, 0x41);
+    epaper_27inch_spi_send_command(spi, COMMAND_PARTIAL_DISPLAY_REFRESH);
+    epaper_27inch_spi_send_data_single(spi, 0x00);
 
 	return 0;
 }
@@ -220,6 +336,25 @@ static int epaper_27inch_configure_power(struct spi_device *spi) {
 static int epaper_27inch_configure_panel(struct spi_device *spi) {
 	struct epaper_27inch_spi_private *prv;
 	prv = spi_get_drvdata(spi);
+
+	epaper_27inch_spi_send_command(spi, COMMAND_PANEL_SETTING);
+	/* # KW-BF   KWR-AF    BWROTP 0f */
+	epaper_27inch_spi_send_data_single(spi, 0xAF);
+	epaper_27inch_spi_send_command(spi, COMMAND_PLL_CONTROL);
+	/* 3A 100HZ   29 150Hz 39 200HZ    31 171HZ */
+	epaper_27inch_spi_send_data_single(spi, 0x3A);
+	epaper_27inch_spi_send_command(spi, COMMAND_VCM_DC_SETTING_REGISTER);
+	epaper_27inch_spi_send_data_single(spi, 0x12);
+
+	return 0;
+}
+
+static int epaper_27inch_set_lut(struct spi_device *spi) {
+	struct epaper_27inch_spi_private *prv;
+	prv = spi_get_drvdata(spi);
+
+	/* TODO */
+
 	return 0;
 }
 
@@ -260,25 +395,30 @@ static int epaper_27inch_spi_probe(struct spi_device *spi) {
 	spi_set_drvdata(spi, prv);
 
 	epaper_27inch_reset(spi);
-	
+
 	err = epaper_27inch_configure_power(spi);
 	if (err) {
-		goto exit_err;
+		goto exit_free_mem;
 	}
 
 	err = epaper_27inch_poweron(spi);
 	if (err) {
-		goto exit_err;
+		goto exit_free_mem;
 	}
 
 	err = epaper_27inch_configure_panel(spi);
 	if (err) {
-		goto exit_err;
+		goto exit_free_mem;
+	}
+
+	err = epaper_27inch_set_lut(spi);
+	if (err) {
+		goto exit_free_mem;
 	}
 
 	err = epaper_27inch_clear(spi);
 	if (err) {
-		goto exit_err;
+		goto exit_free_mem;
 	}
 
 	return 0;
@@ -293,6 +433,8 @@ exit_err:
 
 static int epaper_27inch_spi_remove(struct spi_device *spi) {
 	struct epaper_27inch_spi_private *prv = spi_get_drvdata(spi);
+
+	epaper_27inch_sleep(spi);
 	kfree(prv);
 	return 0;
 }
