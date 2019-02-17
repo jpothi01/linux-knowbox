@@ -9,13 +9,16 @@
 #include <linux/init.h>
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
+#include <linux/uaccess.h>
 #include <linux/spi/spi.h>
 #include <linux/of_device.h>
 
-/* Display resolution */
-#define EPD_WIDTH 176
+/* These values are swapped from the reference implementation so
+that the longer side is "width". This means we need to rotate when
+drawing, but it's worth it to have the right screen orientation */
 #define EPD_HEIGHT 264
-#define EPD_NUM_PIXELS (EPD_WIDTH * EPD_WIDTH)
+#define EPD_WIDTH 176
+#define EPD_NUM_PIXELS (EPD_WIDTH * EPD_HEIGHT)
 
 /* SPI commands */
 #define COMMAND_PANEL_SETTING 0x00
@@ -79,10 +82,11 @@ TODO:
 
 */
 
-struct epaper_27inch_spi_private {
+struct epaper_27inch {
 	int gpio_rst_n;
 	int gpio_busy;
 	int gpio_dc;
+	struct fb_info *fb_info;
 };
 
 /* Look-up tables. */
@@ -139,7 +143,7 @@ static char lut_bb[42] = {
 
 static int epaper_27inch_spi_send_command(struct spi_device *spi, char command)
 {
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 	struct spi_transfer xfers[] = {
 		{
 			.len = 1,
@@ -147,78 +151,84 @@ static int epaper_27inch_spi_send_command(struct spi_device *spi, char command)
 		},
 	};
 
-	prv = spi_get_drvdata(spi);
-	gpio_set_value(prv->gpio_dc, DC_COMMAND);
+	epaper = spi_get_drvdata(spi);
+	gpio_set_value(epaper->gpio_dc, DC_COMMAND);
 
 	return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
 }
 
 static int epaper_27inch_spi_send_data(struct spi_device *spi, char* data, int data_size)
 {
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
+	int i;
+	int err;
 
-	struct spi_transfer xfers[] = {
-		{
-			.len = data_size,
-			.tx_buf = data,
-		},
-	};
+	epaper = spi_get_drvdata(spi);
+	gpio_set_value(epaper->gpio_dc, DC_DATA);
 
-	prv = spi_get_drvdata(spi);
-	gpio_set_value(prv->gpio_dc, DC_DATA);
+	for (i = 0; i < data_size; ++i) {
+		struct spi_transfer xfers[] = {
+			{
+				.len = 1,
+				.tx_buf = &data[i],
+			},
+		};
 
-	return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+		err = spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+		if (err) {
+			return err;
+		}
+	}	
+
+	return 0;
 }
 
 static int epaper_27inch_spi_send_data_single(struct spi_device *spi, char data) {
 	return epaper_27inch_spi_send_data(spi, &data, 1);
 }
 
-static int epaper_27inch_spi_send_command_with_data(struct spi_device *spi, char command, char* data, int data_size)
-{
-	int err;
-	err = epaper_27inch_spi_send_command(spi, command);
-	if (err) {
-		return err;
-	}
+// static int epaper_27inch_spi_send_command_with_data(struct spi_device *spi, char command, char* data, int data_size)
+// {
+// 	int err;
+// 	err = epaper_27inch_spi_send_command(spi, command);
+// 	if (err) {
+// 		return err;
+// 	}
 
-	return epaper_27inch_spi_send_data(spi, data, data_size);
-}
+// 	return epaper_27inch_spi_send_data(spi, data, data_size);
+// }
 
 static int epaper_27inch_get_status(struct spi_device *spi) {
 	int err;
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 	char status;
 
-	dev_warn(&spi->dev, "Entering epaper_27inch_get_status\n");
-
-	prv = spi_get_drvdata(spi);
+	epaper = spi_get_drvdata(spi);
 
 	err = epaper_27inch_spi_send_command(spi, COMMAND_GET_STATUS);
 	if (err) {
 		return err;
 	}
 
-	gpio_set_value(prv->gpio_dc, DC_DATA);
+	gpio_set_value(epaper->gpio_dc, DC_DATA);
 	err = spi_read(spi, &status, 1);
 	if (err) {
 		return err;
 	}
 
-	dev_warn(&spi->dev, "Got status: %x", status);
 	return 0;
 }
 
 static void epaper_27inch_wait_until_idle(struct spi_device *spi) {
-	struct epaper_27inch_spi_private *prv;
-	prv = spi_get_drvdata(spi);
+	struct epaper_27inch *epaper;
+	epaper = spi_get_drvdata(spi);
 
 	dev_warn(&spi->dev, "Entering epaper_27inch_wait_until_idle\n");
 
 	/* The reference implementation sends the GET_STATUS command while spinning
 	on the idle GPIO. Though it is unclear why, we will do that as well. */
 	epaper_27inch_get_status(spi);
-	while (gpio_get_value(prv->gpio_busy) == 0) {
+	while (gpio_get_value(epaper->gpio_busy) == 0) {
 		epaper_27inch_get_status(spi);
 		usleep_range(500, 1000);
 	}
@@ -265,16 +275,18 @@ static int epaper_27inch_clear(struct spi_device *spi) {
 		return err;
 	}
 
+	epaper_27inch_wait_until_idle(spi);
+
 	return 0;
 }
 
 static int epaper_27inch_sleep(struct spi_device *spi) {
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 	int err;
 
 	dev_warn(&spi->dev, "Entering epaper_27inch_sleep\n");
 
-	prv = spi_get_drvdata(spi);
+	epaper = spi_get_drvdata(spi);
 
 	err = epaper_27inch_spi_send_command(spi, COMMAND_VCOM_AND_DATA_INTERVAL_SETTING);
 	if (err) {
@@ -307,26 +319,26 @@ static int epaper_27inch_sleep(struct spi_device *spi) {
 
 static void epaper_27inch_reset(struct spi_device *spi) {
 	int reset_delay;
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 
 	dev_warn(&spi->dev, "Entering epaper_27inch_reset\n");
 
-	prv = spi_get_drvdata(spi);
+	epaper = spi_get_drvdata(spi);
 
 	/* This is the value used in the reference implementation */
 	reset_delay = 200;
 
-	gpio_set_value(prv->gpio_rst_n, 1);
+	gpio_set_value(epaper->gpio_rst_n, 1);
 	msleep(reset_delay);
-	gpio_set_value(prv->gpio_rst_n, 0);
+	gpio_set_value(epaper->gpio_rst_n, 0);
 	msleep(reset_delay);
-	gpio_set_value(prv->gpio_rst_n, 1);
+	gpio_set_value(epaper->gpio_rst_n, 1);
 	msleep(reset_delay);
 }
 
 static int epaper_27inch_poweron(struct spi_device *spi) {
-	struct epaper_27inch_spi_private *prv;
-	prv = spi_get_drvdata(spi);
+	struct epaper_27inch *epaper;
+	epaper = spi_get_drvdata(spi);
 
 	dev_warn(&spi->dev, "Entering epaper_27inch_poweron\n");
 
@@ -337,12 +349,12 @@ static int epaper_27inch_poweron(struct spi_device *spi) {
 }
 
 static int epaper_27inch_configure_power(struct spi_device *spi) {
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 	int err;
 
 	dev_warn(&spi->dev, "Entering epaper_27inch_configure_power\n");
 
-	prv = spi_get_drvdata(spi);
+	epaper = spi_get_drvdata(spi);
 
 	/* This sequence of black magic incantations is taken from the reference
 	implementation, which implements the flow chart found in section 8-2 of the
@@ -530,12 +542,12 @@ static int epaper_27inch_configure_power(struct spi_device *spi) {
 }
 
 static int epaper_27inch_configure_panel(struct spi_device *spi) {
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 	int err;
 
 	dev_warn(&spi->dev, "Entering epaper_27inch_configure_panel\n");
 
-	prv = spi_get_drvdata(spi);
+	epaper = spi_get_drvdata(spi);
 
 	err = epaper_27inch_spi_send_command(spi, COMMAND_PANEL_SETTING);
 	if (err) {
@@ -573,12 +585,12 @@ static int epaper_27inch_configure_panel(struct spi_device *spi) {
 }
 
 static int epaper_27inch_set_lut(struct spi_device *spi) {
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 	int err;
 
 	dev_warn(&spi->dev, "Entering epaper_27inch_set_lut\n");
 
-	prv = spi_get_drvdata(spi);
+	epaper = spi_get_drvdata(spi);
 
 	err = epaper_27inch_spi_send_command(spi, COMMAND_LUT_FOR_VCOM);
 	if (err) {
@@ -633,59 +645,62 @@ static int epaper_27inch_set_lut(struct spi_device *spi) {
 	return 0;
 }
 
+static int epaper_27inch_fb_probe(struct spi_device *spi);
+static int epaper_27inch_fb_remove(struct spi_device *spi);
+
 static int epaper_27inch_spi_probe(struct spi_device *spi) {
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 	int err;
 	struct device_node *of_node = spi->dev.of_node;
 
 	dev_warn(&spi->dev, "Entering epaper_spi_probe\n");
 
-	prv = devm_kzalloc(&spi->dev, sizeof(*prv), GFP_KERNEL);
-	if (!prv) {
+	epaper = devm_kzalloc(&spi->dev, sizeof(*epaper), GFP_KERNEL);
+	if (!epaper) {
 		err = -ENOMEM;
 		goto exit_err;
 	}
 
-	prv->gpio_rst_n = of_get_named_gpio(of_node, "gpio-rst", 0);
-	if (!gpio_is_valid(prv->gpio_rst_n)) {
-		dev_err(&spi->dev, "Unable to parse reset GPIO %d\n", prv->gpio_rst_n);
-		err = prv->gpio_rst_n;
-		goto exit_free_mem;
+	epaper->gpio_rst_n = of_get_named_gpio(of_node, "gpio-rst", 0);
+	if (!gpio_is_valid(epaper->gpio_rst_n)) {
+		dev_err(&spi->dev, "Unable to parse reset GPIO %d\n", epaper->gpio_rst_n);
+		err = epaper->gpio_rst_n;
+		goto exit_err;
 	}
 
-	err = devm_gpio_request_one(&spi->dev, prv->gpio_rst_n, GPIOF_OUT_INIT_LOW, "rst_n");
+	err = devm_gpio_request_one(&spi->dev, epaper->gpio_rst_n, GPIOF_OUT_INIT_LOW, "rst_n");
 	if (err) {
-		dev_err(&spi->dev, "Unable to request reset GPIO %d\n", prv->gpio_rst_n);
-		goto exit_free_mem;
+		dev_err(&spi->dev, "Unable to request reset GPIO %d\n", epaper->gpio_rst_n);
+		goto exit_err;
 	}
 
-	prv->gpio_busy = of_get_named_gpio(of_node, "gpio-busy", 0);
-	if (!gpio_is_valid(prv->gpio_busy)) {
-		dev_err(&spi->dev, "Unable to parse busy GPIO %d\n", prv->gpio_busy);
-		err = prv->gpio_busy;
-		goto exit_free_mem;
+	epaper->gpio_busy = of_get_named_gpio(of_node, "gpio-busy", 0);
+	if (!gpio_is_valid(epaper->gpio_busy)) {
+		dev_err(&spi->dev, "Unable to parse busy GPIO %d\n", epaper->gpio_busy);
+		err = epaper->gpio_busy;
+		goto exit_err;
 	}
 
-	err = devm_gpio_request_one(&spi->dev, prv->gpio_busy, GPIOF_IN, "busy");
+	err = devm_gpio_request_one(&spi->dev, epaper->gpio_busy, GPIOF_IN, "busy");
 	if (err) {
-		dev_err(&spi->dev, "Unable to request budy GPIO %d\n", prv->gpio_busy);
-		goto exit_free_mem;
+		dev_err(&spi->dev, "Unable to request budy GPIO %d\n", epaper->gpio_busy);
+		goto exit_err;
 	}
 
-	prv->gpio_dc = of_get_named_gpio(of_node, "gpio-dc", 0);
-	if (!gpio_is_valid(prv->gpio_dc)) {
-		dev_err(&spi->dev, "Unable to parse DC GPIO %d\n", prv->gpio_dc);
-		err = prv->gpio_dc;
-		goto exit_free_mem;
+	epaper->gpio_dc = of_get_named_gpio(of_node, "gpio-dc", 0);
+	if (!gpio_is_valid(epaper->gpio_dc)) {
+		dev_err(&spi->dev, "Unable to parse DC GPIO %d\n", epaper->gpio_dc);
+		err = epaper->gpio_dc;
+		goto exit_err;
 	}
 
-	err = devm_gpio_request_one(&spi->dev, prv->gpio_dc, GPIOF_OUT_INIT_LOW, "dc");
+	err = devm_gpio_request_one(&spi->dev, epaper->gpio_dc, GPIOF_OUT_INIT_LOW, "dc");
 	if (err) {
-		dev_err(&spi->dev, "Unable to request DC GPIO %d\n", prv->gpio_dc);
-		goto exit_free_mem;
+		dev_err(&spi->dev, "Unable to request DC GPIO %d\n", epaper->gpio_dc);
+		goto exit_err;
 	}
 
-	spi_set_drvdata(spi, prv);
+	spi_set_drvdata(spi, epaper);
 
 	dev_warn(&spi->dev, "GPIOs OK. Initializating device.\n");
 
@@ -694,68 +709,72 @@ static int epaper_27inch_spi_probe(struct spi_device *spi) {
 	err = epaper_27inch_configure_power(spi);
 	if (err) {
 		dev_err(&spi->dev, "Error in epaper_27inch_configure_power: %d\n", err);
-		goto exit_free_mem;
+		goto exit_err;
 	}
 
 	err = epaper_27inch_poweron(spi);
 	if (err) {
 		dev_err(&spi->dev, "Error in epaper_27inch_poweron: %d\n", err);
-		goto exit_free_mem;
+		goto exit_err;
 	}
 
 	err = epaper_27inch_configure_panel(spi);
 	if (err) {
 		dev_err(&spi->dev, "Error in epaper_27inch_configure_panel: %d\n", err);
-		goto exit_free_mem;
+		goto exit_err;
 	}
 
 	err = epaper_27inch_set_lut(spi);
 	if (err) {
 		dev_err(&spi->dev, "Error in epaper_27inch_set_lut: %d\n", err);
-		goto exit_free_mem;
+		goto exit_err;
 	}
 
 	err = epaper_27inch_clear(spi);
 	if (err) {
 		dev_err(&spi->dev, "Error in epaper_27inch_clear: %d\n", err);
-		goto exit_free_mem;
+		goto exit_err;
 	}
 
-	dev_warn(&spi->dev, "Device initialized!\n");
+	dev_warn(&spi->dev, "SPI device initialized!\n");
+
+	err = epaper_27inch_fb_probe(spi);
+	if (err) {
+		dev_err(&spi->dev, "Error in epaper_27inch_fb_probe: %d\n", err);
+		goto exit_err;
+	}
 
 	return 0;
-
-exit_free_mem:
-	kfree(prv);
-	return err;
 
 exit_err:
 	return err;
 }
 
 static int epaper_27inch_spi_remove(struct spi_device *spi) {
-	struct epaper_27inch_spi_private *prv;
+	struct epaper_27inch *epaper;
 
-	prv = spi_get_drvdata(spi);
+	epaper = spi_get_drvdata(spi);
 
-	if (!prv) {
-		dev_warn(&spi->dev, "epaper_27inch_spi_remove: prv was null?\n");
+	if (!epaper) {
+		dev_warn(&spi->dev, "epaper_27inch_spi_remove: epaper was null?\n");
 		return 0;
 	}
 
 	epaper_27inch_sleep(spi);
 
-	if (gpio_is_valid(prv->gpio_dc)) {
-		gpio_free(prv->gpio_dc);
+	if (gpio_is_valid(epaper->gpio_dc)) {
+		gpio_free(epaper->gpio_dc);
 	}
 
-	if (gpio_is_valid(prv->gpio_rst_n)) {
-		gpio_free(prv->gpio_rst_n);
+	if (gpio_is_valid(epaper->gpio_rst_n)) {
+		gpio_free(epaper->gpio_rst_n);
 	}
 
-	if (gpio_is_valid(prv->gpio_busy)) {
-		gpio_free(prv->gpio_busy);
+	if (gpio_is_valid(epaper->gpio_busy)) {
+		gpio_free(epaper->gpio_busy);
 	}
+
+	epaper_27inch_fb_remove(spi);
 
 	return 0;
 }
@@ -785,129 +804,252 @@ static struct spi_driver epaper_27inch_spi_driver = {
 	.remove  = epaper_27inch_spi_remove,
 };
 
-/* Framebuffer driver */
+/* Framebuffer driver. Most of this implementation is lifted from hecubafb.c, which is
+a framebuffer driver for a different class of ePaper displays that have a similar API. */
 
-// struct epaper_27inch_par {
-// 	spinlock_t lock;
-// };
+struct epaper_27inch_par {
+	struct spi_device *spi;
+	struct fb_info *info;
+//	unsigned char *shadow_video_memory;
+};
 
-// static const struct fb_fix_screeninfo epaper_27inch_fix_screeninfo = {
-// 	.visual = FB_VISUAL_MONO01,
-// 	.type = FB_TYPE_PACKED_PIXELS,
-// 	.id = "2.7 inch EPD",
-// 	.line_length = EPD_WIDTH,
-// 	.xpanstep =	0,
-// 	.ypanstep =	0,
-// 	.ywrapstep =	0,
-// 	.accel =	FB_ACCEL_NONE,
-// };
+static const struct fb_fix_screeninfo epaper_27inch_fix_screeninfo = {
+	.visual = FB_VISUAL_MONO01,
+	.type = FB_TYPE_PACKED_PIXELS,
+	.id = "2.7 inch EPD",
+	.line_length = EPD_WIDTH,
+	.xpanstep =	0,
+	.ypanstep =	0,
+	.ywrapstep = 0,
+	.accel =	FB_ACCEL_NONE
+};
 
-// static const struct fb_var_screeninfo epaper_27inch_var_screeninfo = {
-// 	.xres		= EPD_WIDTH,
-// 	.yres		= EPD_HEIGHT,
-// 	.xres_virtual	= EPD_WIDTH,
-// 	.yres_virtual	= EPD_HEIGHT,
-// 	.bits_per_pixel	= 1,
-// 	.nonstd		= 1,
-// };
+static const struct fb_var_screeninfo epaper_27inch_var_screeninfo = {
+	.xres		= EPD_WIDTH,
+	.yres		= EPD_HEIGHT,
+	.xres_virtual	= EPD_WIDTH,
+	.yres_virtual	= EPD_HEIGHT,
+	.bits_per_pixel	= 1,
+	.nonstd		= 1
+};
 
-// static int epaper_27inch_probe(struct platform_device *op)
-// {
-// 	struct fb_info *info;
-// 	struct epaper_27inch_par *par;
-// 	int err;
+static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
+{
+	int i;
+	int err;
+	struct spi_device *spi;
+	unsigned char *buf;
 
-// 	printk(KERN_INFO "In epaper_27inch_probe\n");
+	spi = par->spi;
 
-// 	info = framebuffer_alloc(sizeof(struct epaper_27inch_par), &op->dev);
-// 	err = -ENOMEM;
-// 	if (!info)
-// 		goto out_err;
+	buf = (unsigned char __force *)par->info->screen_base;
 
-// 	info->fix = epaper_27inch_fix_screeninfo;
-// 	info->var = epaper_27inch_var_screeninfo;
+	dev_warn(&spi->dev, "Updating ePaper display\n");
 
-// 	par = info->par;
-// 	spin_lock_init(&par->lock);
+	/* "before" data -- TODO: use actual diffing */
+	err = epaper_27inch_spi_send_command(spi, COMMAND_DATA_START_TRANSMISSION_1);
+	if (err) {
+		goto exit_err;
+	}
 
-// 	err = register_framebuffer(info);
-// 	if (err < 0)
-// 		goto out_dealloc_cmap;
+	for (i = 0; i < EPD_NUM_PIXELS / 8; ++i) {
+		err = epaper_27inch_spi_send_data_single(spi, 0xFF);
+		if (err) {
+			goto exit_err;
+		}
+	}
 
-// 	dev_set_drvdata(&op->dev, info);
+	/* "after" data */
+	err = epaper_27inch_spi_send_command(spi, COMMAND_DATA_START_TRANSMISSION_2);
+	if (err) {
+		goto exit_err;
+	}
 
-// 	return 0;
+	err = epaper_27inch_spi_send_data(spi, buf, EPD_NUM_PIXELS / 8);
+	if (err) {
+		goto exit_err;
+	}
 
-// out_dealloc_cmap:
-// 	fb_dealloc_cmap(&info->cmap);
-// 	framebuffer_release(info);
+	err = epaper_27inch_spi_send_command(spi, COMMAND_DISPLAY_REFRESH);
+	if (err) {
+		goto exit_err;
+	}
 
-// out_err:
-// 	return err;
-// }
+	epaper_27inch_wait_until_idle(spi);
+	return;
 
-// static int epaper_27inch_remove(struct platform_device *op)
-// {
-// 	struct fb_info *info = dev_get_drvdata(&op->dev);
+exit_err:
+	dev_err(&spi->dev, "Failed to update display. Error: %d\n", err);
+}
 
-// 	unregister_framebuffer(info);
-// 	fb_dealloc_cmap(&info->cmap);
+/* this is called back from the deferred io workqueue */
+static void epaper_27inch_dpy_deferred_io(struct fb_info *info, struct list_head *pagelist)
+{
+	epaper_27inch_dpy_update(info->par);
+}
 
-// 	framebuffer_release(info);
-// 	return 0;
-// }
+static void epaper_27inch_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
+{
+	struct epaper_27inch_par *par = info->par;
 
-// static const struct of_device_id epaper_27inch_match[] = {
-// 	{
-// 		.name = "waveshare,epaper-2-7-inch",
-// 	},
-// 	{},
-// };
-// MODULE_DEVICE_TABLE(of, epaper_27inch_match);
+	sys_fillrect(info, rect);
 
-// static struct platform_driver epaper_27inch_driver = {
-// 	.driver = {
-// 		.name = "epaper_27inch",
-// 		.of_match_table = epaper_27inch_match,
-// 	},
-// 	.probe		= epaper_27inch_probe,
-// 	.remove		= epaper_27inch_remove,
-// };
+	epaper_27inch_dpy_update(par);
+}
 
-// static int __init epaper_27inch_init(void)
-// {
-// 	int err;
+static void epaper_27inch_copyarea(struct fb_info *info, const struct fb_copyarea *area)
+{
+	struct epaper_27inch_par *par = info->par;
 
-// 	printk(KERN_INFO "In epaper_27inch_init\n");
-// 	if (fb_get_options("epaper_27inch", NULL)) {
-// 		err = -ENODEV;
-// 		printk(KERN_INFO "fb_get_options failed\n");
-// 		goto exit_err;
-// 	}
+	sys_copyarea(info, area);
 
-// 	err = spi_register_driver(&epaper_27inch_spi_driver);
-// 	if (err) {
-// 		printk(KERN_INFO "spi_register_driver failed\n");
-// 		goto exit_err;
-// 	}
+	epaper_27inch_dpy_update(par);
+}
 
-// 	err = platform_driver_register(&epaper_27inch_driver);
-// 	if (err) {
-// 		printk(KERN_INFO "platform_driver_register failed\n");
-// 		goto exit_err;
-// 	}
+static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image *image)
+{
+	struct epaper_27inch_par *par = info->par;
 
-// 	return 0;
-// exit_err:
-// 	return err;
-// }
+	sys_imageblit(info, image);
 
-// static void __exit epaper_27inch_exit(void)
-// {
-// 	printk(KERN_INFO "In epaper_27inch_exit\n");
-// 	spi_unregister_driver(&epaper_27inch_spi_driver);
-// 	platform_driver_unregister(&epaper_27inch_driver);
-// }
+	epaper_27inch_dpy_update(par);
+}
+
+/*
+ * this is the slow path from userspace. they can seek and write to
+ * the fb. it's inefficient to do anything less than a full screen draw
+ */
+static ssize_t epaper_27inch_write(struct fb_info *info, const char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	struct epaper_27inch_par *par = info->par;
+	unsigned long p = *ppos;
+	void *dst;
+	int err = 0;
+	unsigned long total_size;
+
+	if (info->state != FBINFO_STATE_RUNNING)
+		return -EPERM;
+
+	total_size = info->fix.smem_len;
+
+	if (p > total_size)
+		return -EFBIG;
+
+	if (count > total_size) {
+		err = -EFBIG;
+		count = total_size;
+	}
+
+	if (count + p > total_size) {
+		if (!err)
+			err = -ENOSPC;
+
+		count = total_size - p;
+	}
+
+	printk(KERN_INFO "epaper_27inch_write: Writing %d bytes at offset %lu", count, p);
+
+	dst = (void __force *) (info->screen_base + p);
+
+	if (copy_from_user(dst, buf, count))
+		err = -EFAULT;
+
+	if  (!err)
+		*ppos += count;
+
+	epaper_27inch_dpy_update(par);
+
+	return (err) ? err : count;
+}
+
+static struct fb_ops epaper_27inch_ops = {
+	.owner		= THIS_MODULE,
+	.fb_read        = fb_sys_read,
+	.fb_write	= epaper_27inch_write,
+	.fb_fillrect	= epaper_27inch_fillrect,
+	.fb_copyarea	= epaper_27inch_copyarea,
+	.fb_imageblit	= epaper_27inch_imageblit,
+};
+
+static struct fb_deferred_io epaper_27inch_defio = {
+	.delay		= HZ,
+	.deferred_io	= epaper_27inch_dpy_deferred_io,
+};
+
+static int epaper_27inch_fb_probe(struct spi_device *spi)
+{
+	struct epaper_27inch *epaper;
+	struct epaper_27inch_par *par;
+	struct fb_info *info;
+	int err;
+	int video_memory_size;
+	unsigned char *video_memory;
+
+	epaper = spi_get_drvdata(spi);
+
+	dev_warn(&spi->dev, "In epaper_27inch_fb_probe\n");
+
+	video_memory_size = EPD_NUM_PIXELS / 8;
+	video_memory = vzalloc(video_memory_size);
+	if (!video_memory) {
+		dev_err(&spi->dev, "Could not allocate video memory\n");
+		goto out_err;
+	}
+
+	epaper->fb_info = framebuffer_alloc(sizeof(struct epaper_27inch_par), &spi->dev);
+	if (!epaper->fb_info) {
+		err = -ENOMEM;
+		goto out_dealloc_vmem;
+	}
+
+	info = epaper->fb_info;
+	info->screen_base = (char __force __iomem *)video_memory;
+	info->fbops = &epaper_27inch_ops;
+
+	info->fix = epaper_27inch_fix_screeninfo;
+	info->var = epaper_27inch_var_screeninfo;
+	info->fix.smem_len = video_memory_size;
+	info->flags = FBINFO_FLAG_DEFAULT | FBINFO_VIRTFB;
+	info->fbdefio = &epaper_27inch_defio;
+	fb_deferred_io_init(info);
+
+	par = info->par;
+	par->info = info;
+	par->spi = spi;
+
+	err = register_framebuffer(info);
+	if (err < 0)
+		goto out_dealloc;
+
+	fb_info(info, "epaper_27inch frame buffer device, using %dK of video memory\n",
+		video_memory_size >> 10);
+
+	return 0;
+
+out_dealloc:
+	framebuffer_release(info);
+out_dealloc_vmem:
+	vfree(video_memory);
+
+out_err:
+	return err;
+}
+
+static int epaper_27inch_fb_remove(struct spi_device *spi)
+{
+	struct epaper_27inch *epaper = spi_get_drvdata(spi);
+	struct fb_info *info = epaper->fb_info;
+
+	if (info) {
+		fb_deferred_io_cleanup(info);
+		unregister_framebuffer(info);
+		vfree((void __force *)info->screen_base);
+		framebuffer_release(info);
+	}
+
+	return 0;
+}
 
 module_spi_driver(epaper_27inch_spi_driver);
 
