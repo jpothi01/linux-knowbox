@@ -811,6 +811,8 @@ struct epaper_27inch_par {
 	struct spi_device *spi;
 	struct fb_info *info;
 	unsigned char *shadow_video_memory;
+	bool is_updating;
+	struct mutex is_updating_lock;
 };
 
 static const struct fb_fix_screeninfo epaper_27inch_fix_screeninfo = {
@@ -835,7 +837,7 @@ static const struct fb_var_screeninfo epaper_27inch_var_screeninfo = {
 
 static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 {
-	int i; int j;
+	int i;
 	int err;
 	struct spi_device *spi;
 	unsigned char *buf;
@@ -857,7 +859,7 @@ static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 
 	if (!need_update) {
 		dev_warn(&spi->dev, "Skipping updating ePaper display--no update.\n");
-		return;
+		goto exit_unlock;
 	}
 
 	dev_warn(&spi->dev, "Updating ePaper display\n");
@@ -892,10 +894,17 @@ static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 	memcpy(old_frame, buf, EPD_NUM_PIXELS / 8);
 
 	epaper_27inch_wait_until_idle(spi);
-	return;
+
+	goto exit_unlock;
 
 exit_err:
 	dev_err(&spi->dev, "Failed to update display. Error: %d\n", err);
+
+exit_unlock:
+	mutex_lock(&par->is_updating_lock);
+	par->is_updating = false;
+	mutex_unlock(&par->is_updating_lock);
+
 }
 
 /* this is called back from the deferred io workqueue */
@@ -906,7 +915,22 @@ static void epaper_27inch_dpy_deferred_io(struct fb_info *info, struct list_head
 	spi = par->spi;
 
 	dev_warn(&spi->dev, "epaper_27inch_dpy_deferred_io\n");
+	mutex_lock(&par->is_updating_lock);
+	par->is_updating = true;
+	mutex_unlock(&par->is_updating_lock);
+
 	epaper_27inch_dpy_update(par);
+}
+
+static void epaper_27inch_update_delayed(struct fb_info *info) {
+	struct epaper_27inch_par *par = info->par;
+
+	mutex_lock(&par->is_updating_lock);
+	if (!par->is_updating) {
+		par->is_updating = true;
+		schedule_delayed_work(&info->deferred_work, 3 * HZ);
+	}
+	mutex_unlock(&par->is_updating_lock);
 }
 
 static void epaper_27inch_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
@@ -917,8 +941,8 @@ static void epaper_27inch_fillrect(struct fb_info *info, const struct fb_fillrec
 
 	dev_warn(&spi->dev, "epaper_27inch_fillrect\n");
 	sys_fillrect(info, rect);
-	cancel_delayed_work(&info->deferred_work);
-	schedule_delayed_work(&info->deferred_work, 3 * HZ);
+	
+	epaper_27inch_update_delayed(info);
 }
 
 static void epaper_27inch_copyarea(struct fb_info *info, const struct fb_copyarea *area)
@@ -930,8 +954,7 @@ static void epaper_27inch_copyarea(struct fb_info *info, const struct fb_copyare
 	dev_warn(&spi->dev, "epaper_27inch_copyarea\n");
 
 	sys_copyarea(info, area);
-	cancel_delayed_work(&info->deferred_work);
-	schedule_delayed_work(&info->deferred_work, 3 * HZ);
+	epaper_27inch_update_delayed(info);
 }
 
 static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image *image)
@@ -1010,8 +1033,7 @@ static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image 
 		cursor += info->fix.line_length;
 	}
 
-	cancel_delayed_work(&info->deferred_work);
-	schedule_delayed_work(&info->deferred_work, 3 * HZ);
+	epaper_27inch_update_delayed(info);
 }
 
 /*
@@ -1021,7 +1043,6 @@ static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image 
 static ssize_t epaper_27inch_write(struct fb_info *info, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
-	struct epaper_27inch_par *par = info->par;
 	unsigned long p = *ppos;
 	void *dst;
 	int err = 0;
@@ -1057,7 +1078,7 @@ static ssize_t epaper_27inch_write(struct fb_info *info, const char __user *buf,
 	if  (!err)
 		*ppos += count;
 
-	epaper_27inch_dpy_update(info->par);
+	epaper_27inch_update_delayed(info);
 
 	return (err) ? err : count;
 }
@@ -1126,6 +1147,8 @@ static int epaper_27inch_fb_probe(struct spi_device *spi)
 	par->info = info;
 	par->spi = spi;
 	par->shadow_video_memory = vzalloc(video_memory_size);
+	par->is_updating = false;
+	mutex_init(&par->is_updating_lock);
 	if (!par->shadow_video_memory) {
 		err = -ENOMEM;
 		goto out_dealloc_shadow_vmem;
@@ -1166,6 +1189,7 @@ static int epaper_27inch_fb_remove(struct spi_device *spi)
 		vfree((void __force *)info->screen_base);
 		vfree((void __force *)par->shadow_video_memory);
 		framebuffer_release(info);
+		mutex_destroy(&par->is_updating_lock);
 	}
 
 	return 0;
