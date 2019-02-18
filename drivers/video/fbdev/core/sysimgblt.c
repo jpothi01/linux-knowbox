@@ -254,6 +254,7 @@ void sys_imageblit(struct fb_info *p, const struct fb_image *image)
 
 	bitstart /= 8;
 	bitstart &= ~(bpl - 1);
+
 	dst1 = (void __force *)p->screen_base + bitstart;
 
 	if (p->fbops->fb_sync)

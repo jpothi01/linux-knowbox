@@ -810,14 +810,14 @@ a framebuffer driver for a different class of ePaper displays that have a simila
 struct epaper_27inch_par {
 	struct spi_device *spi;
 	struct fb_info *info;
-//	unsigned char *shadow_video_memory;
+	unsigned char *shadow_video_memory;
 };
 
 static const struct fb_fix_screeninfo epaper_27inch_fix_screeninfo = {
+	.id = "2.7 inch EPD",
 	.visual = FB_VISUAL_MONO01,
 	.type = FB_TYPE_PACKED_PIXELS,
-	.id = "2.7 inch EPD",
-	.line_length = EPD_WIDTH,
+	.line_length = EPD_WIDTH / 8,
 	.xpanstep =	0,
 	.ypanstep =	0,
 	.ywrapstep = 0,
@@ -839,10 +839,26 @@ static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 	int err;
 	struct spi_device *spi;
 	unsigned char *buf;
+	unsigned char *old_frame;
+	bool need_update;
 
 	spi = par->spi;
 
 	buf = (unsigned char __force *)par->info->screen_base;
+	old_frame = (unsigned char __force *)par->shadow_video_memory;
+
+	need_update = false;
+	for (i = 0; i < EPD_NUM_PIXELS / 8; ++i) {
+		if (buf[i] != old_frame[i]) {
+			need_update = true;
+			break;
+		}
+	}
+
+	if (!need_update) {
+		dev_warn(&spi->dev, "Skipping updating ePaper display--no update.\n");
+		return;
+	}
 
 	dev_warn(&spi->dev, "Updating ePaper display\n");
 
@@ -852,11 +868,9 @@ static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 		goto exit_err;
 	}
 
-	for (i = 0; i < EPD_NUM_PIXELS / 8; ++i) {
-		err = epaper_27inch_spi_send_data_single(spi, 0xFF);
-		if (err) {
-			goto exit_err;
-		}
+	err = epaper_27inch_spi_send_data(spi, old_frame, EPD_NUM_PIXELS / 8);
+	if (err) {
+		goto exit_err;
 	}
 
 	/* "after" data */
@@ -874,6 +888,8 @@ static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 	if (err) {
 		goto exit_err;
 	}
+
+	memcpy(old_frame, buf, EPD_NUM_PIXELS / 8);
 
 	epaper_27inch_wait_until_idle(spi);
 	return;
@@ -893,8 +909,8 @@ static void epaper_27inch_fillrect(struct fb_info *info, const struct fb_fillrec
 	struct epaper_27inch_par *par = info->par;
 
 	sys_fillrect(info, rect);
-
-	epaper_27inch_dpy_update(par);
+	cancel_delayed_work(&info->deferred_work);
+	schedule_delayed_work(&info->deferred_work, 3 * HZ);
 }
 
 static void epaper_27inch_copyarea(struct fb_info *info, const struct fb_copyarea *area)
@@ -902,8 +918,8 @@ static void epaper_27inch_copyarea(struct fb_info *info, const struct fb_copyare
 	struct epaper_27inch_par *par = info->par;
 
 	sys_copyarea(info, area);
-
-	epaper_27inch_dpy_update(par);
+	cancel_delayed_work(&info->deferred_work);
+	schedule_delayed_work(&info->deferred_work, 3 * HZ);
 }
 
 static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image *image)
@@ -911,8 +927,8 @@ static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image 
 	struct epaper_27inch_par *par = info->par;
 
 	sys_imageblit(info, image);
-
-	epaper_27inch_dpy_update(par);
+	cancel_delayed_work(&info->deferred_work);
+	schedule_delayed_work(&info->deferred_work, 3 * HZ);
 }
 
 /*
@@ -958,7 +974,8 @@ static ssize_t epaper_27inch_write(struct fb_info *info, const char __user *buf,
 	if  (!err)
 		*ppos += count;
 
-	epaper_27inch_dpy_update(par);
+	cancel_delayed_work(&info->deferred_work);
+	schedule_delayed_work(&info->deferred_work, 3 * HZ);
 
 	return (err) ? err : count;
 }
@@ -973,7 +990,7 @@ static struct fb_ops epaper_27inch_ops = {
 };
 
 static struct fb_deferred_io epaper_27inch_defio = {
-	.delay		= HZ,
+	.delay		= 3 * HZ,
 	.deferred_io	= epaper_27inch_dpy_deferred_io,
 };
 
@@ -1017,6 +1034,9 @@ static int epaper_27inch_fb_probe(struct spi_device *spi)
 	par = info->par;
 	par->info = info;
 	par->spi = spi;
+	par->shadow_video_memory = vzalloc(video_memory_size);
+	memset(par->shadow_video_memory, 0xFF, video_memory_size);
+	// todo error
 
 	err = register_framebuffer(info);
 	if (err < 0)
@@ -1024,6 +1044,8 @@ static int epaper_27inch_fb_probe(struct spi_device *spi)
 
 	fb_info(info, "epaper_27inch frame buffer device, using %dK of video memory\n",
 		video_memory_size >> 10);
+
+	schedule_delayed_work(&info->deferred_work, epaper_27inch_defio.delay);
 
 	return 0;
 
@@ -1039,12 +1061,15 @@ out_err:
 static int epaper_27inch_fb_remove(struct spi_device *spi)
 {
 	struct epaper_27inch *epaper = spi_get_drvdata(spi);
+	struct epaper_27inch_par *par;
 	struct fb_info *info = epaper->fb_info;
 
 	if (info) {
+		par = info->par;
 		fb_deferred_io_cleanup(info);
 		unregister_framebuffer(info);
 		vfree((void __force *)info->screen_base);
+		vfree((void __force *)par->shadow_video_memory);
 		framebuffer_release(info);
 	}
 
