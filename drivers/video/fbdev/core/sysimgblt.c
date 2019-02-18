@@ -114,11 +114,15 @@ static void slow_imageblit(const struct fb_image *image, struct fb_info *p,
 {
 	u32 shift, color = 0, bpp = p->var.bits_per_pixel;
 	u32 *dst, *dst2;
+	u8 *destOrig;
 	u32 val, pitch = p->fix.line_length;
 	u32 null_bits = 32 - bpp;
 	u32 spitch = (image->width+7)/8;
 	const u8 *src = image->data, *s;
 	u32 i, j, l;
+
+	destOrig = dst1;
+	printk(KERN_INFO "pitch: %d", pitch);
 
 	dst2 = dst1;
 	fgcolor <<= FB_LEFT_POS(p, bpp);
@@ -146,6 +150,7 @@ static void slow_imageblit(const struct fb_image *image, struct fb_info *p,
 
 			/* Did the bitshift spill bits to the next long? */
 			if (shift >= null_bits) {
+				printk(KERN_INFO "dst offset: %d", (u8*)dst1 - destOrig);
 				*dst++ = val;
 				val = (shift == null_bits) ? 0 :
 					FB_SHIFT_LOW(p, color, 32 - shift);
@@ -159,18 +164,19 @@ static void slow_imageblit(const struct fb_image *image, struct fb_info *p,
  		if (shift) {
 			u32 end_mask = FB_SHIFT_HIGH(p, ~(u32)0, shift);
 
+			printk(KERN_INFO "dst offset: %d", (u8*)dst1 - destOrig);
 			*dst &= end_mask;
 			*dst |= val;
 		}
 
 		dst1 += pitch;
 		src += spitch;
-		if (pitch_index) {
-			dst2 += pitch;
-			dst1 = (u8 *)((long)dst2 & ~(sizeof(u32) - 1));
-			start_index += pitch_index;
-			start_index &= 32 - 1;
-		}
+		// if (pitch_index) {
+		// 	dst2 += pitch;
+		// 	dst1 = (u8 *)((long)dst2 & ~(sizeof(u32) - 1));
+		// 	start_index += pitch_index;
+		// 	start_index &= 32 - 1;
+		// }
 
 	}
 }
@@ -243,7 +249,7 @@ void sys_imageblit(struct fb_info *p, const struct fb_image *image)
 	u32 bpl = sizeof(u32), bpp = p->var.bits_per_pixel;
 	u32 width = image->width;
 	u32 dx = image->dx, dy = image->dy;
-	void *dst1;
+	u8 *dst1;
 
 	if (p->state != FBINFO_STATE_RUNNING)
 		return;
@@ -255,7 +261,11 @@ void sys_imageblit(struct fb_info *p, const struct fb_image *image)
 	bitstart /= 8;
 	bitstart &= ~(bpl - 1);
 
-	dst1 = (void __force *)p->screen_base + bitstart;
+	printk(KERN_INFO "bitstart: %d", bitstart);
+	printk(KERN_INFO "start_index: %d", start_index);
+	printk(KERN_INFO "pitch_index: %d", pitch_index);
+
+	dst1 = (u8 __force *)p->screen_base + bitstart;
 
 	if (p->fbops->fb_sync)
 		p->fbops->fb_sync(p);

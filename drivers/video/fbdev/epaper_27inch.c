@@ -815,7 +815,7 @@ struct epaper_27inch_par {
 
 static const struct fb_fix_screeninfo epaper_27inch_fix_screeninfo = {
 	.id = "2.7 inch EPD",
-	.visual = FB_VISUAL_MONO01,
+	.visual = FB_VISUAL_MONO10,
 	.type = FB_TYPE_PACKED_PIXELS,
 	.line_length = EPD_WIDTH / 8,
 	.xpanstep =	0,
@@ -835,7 +835,7 @@ static const struct fb_var_screeninfo epaper_27inch_var_screeninfo = {
 
 static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 {
-	int i;
+	int i; int j;
 	int err;
 	struct spi_device *spi;
 	unsigned char *buf;
@@ -901,13 +901,21 @@ exit_err:
 /* this is called back from the deferred io workqueue */
 static void epaper_27inch_dpy_deferred_io(struct fb_info *info, struct list_head *pagelist)
 {
-	epaper_27inch_dpy_update(info->par);
+	struct spi_device *spi;
+	struct epaper_27inch_par *par = info->par;
+	spi = par->spi;
+
+	dev_warn(&spi->dev, "epaper_27inch_dpy_deferred_io\n");
+	epaper_27inch_dpy_update(par);
 }
 
 static void epaper_27inch_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
+	struct spi_device *spi;
 	struct epaper_27inch_par *par = info->par;
+	spi = par->spi;
 
+	dev_warn(&spi->dev, "epaper_27inch_fillrect\n");
 	sys_fillrect(info, rect);
 	cancel_delayed_work(&info->deferred_work);
 	schedule_delayed_work(&info->deferred_work, 3 * HZ);
@@ -915,7 +923,11 @@ static void epaper_27inch_fillrect(struct fb_info *info, const struct fb_fillrec
 
 static void epaper_27inch_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
+	struct spi_device *spi;
 	struct epaper_27inch_par *par = info->par;
+	spi = par->spi;
+
+	dev_warn(&spi->dev, "epaper_27inch_copyarea\n");
 
 	sys_copyarea(info, area);
 	cancel_delayed_work(&info->deferred_work);
@@ -924,9 +936,80 @@ static void epaper_27inch_copyarea(struct fb_info *info, const struct fb_copyare
 
 static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image *image)
 {
+	struct spi_device *spi;
 	struct epaper_27inch_par *par = info->par;
+	int i;
+	u32 start_offset;
+	u32 cursor;
+	u32 line_cursor;
+	u32 image_line_cursor;
+	u32 num_end_partial_bits;
+	u8 end_partial_bit_mask;
+	u32 offset_for_end_partial_bits;
+	u32 num_begin_partial_bits;	
+	u8 begin_partial_bit_mask;
+	u8 *frame_buffer;
+	spi = par->spi;
 
-	sys_imageblit(info, image);
+	dev_warn(&spi->dev, "epaper_27inch_imageblit\n");
+
+	printk(KERN_INFO "dx: %d, dy: %d, width: %d, height: %d, fg_color: %x, bg_color: %x, depth: %d",
+		image->dx, image->dy, image->width, image->height, image->fg_color, image->bg_color, image->depth);
+
+	if (image->width == 8 && image->height == 8) {
+		printk(KERN_INFO "Image: %02x %02x %02x %02x %02x %02x %02x %02x", 
+		image->data[0], image->data[1], image->data[2], image->data[3], image->data[4], image->data[5], image->data[6], image->data[7]);
+	}
+
+	
+	frame_buffer = info->screen_base;
+	num_begin_partial_bits = (8 - (image->dx - (image->dx % 8))) % 8;
+	begin_partial_bit_mask = (1 << num_begin_partial_bits) - 1;
+	
+	num_end_partial_bits = (image->dx + image->width) % 8;
+	end_partial_bit_mask = ((1 << 8 ) >> num_end_partial_bits);
+
+	offset_for_end_partial_bits = 
+		(image->width - num_begin_partial_bits - num_end_partial_bits) / 8 + 
+		(num_begin_partial_bits ? 1 : 0);
+
+	start_offset = ((image->dy * info->fix.line_length * 8) + image->dx) / 8;
+	cursor = start_offset;
+
+	printk(KERN_INFO "num_begin_partial_bits: %d", num_begin_partial_bits);
+	printk(KERN_INFO "begin_partial_bit_mask: %02x", begin_partial_bit_mask);
+	printk(KERN_INFO "num_end_partial_bits: %d", num_end_partial_bits);
+	printk(KERN_INFO "end_partial_bit_mask: %02x", end_partial_bit_mask);
+	printk(KERN_INFO "offset_for_end_partial_bits: %d", offset_for_end_partial_bits);
+	printk(KERN_INFO "start_offset: %d", start_offset);
+	
+	// Draw horizontal line by horizontal line, one byte at a time
+	for (i = 0; i < image->height; ++i) {
+		line_cursor = cursor;
+
+		image_line_cursor = 0;
+		if (num_begin_partial_bits > 0) {
+			frame_buffer[line_cursor] = 
+				(frame_buffer[line_cursor] & ~begin_partial_bit_mask) |
+				(~image->data[i * image->width + image_line_cursor] & begin_partial_bit_mask);
+			line_cursor++;
+			image_line_cursor++;
+		}
+
+		// Full bytes
+		for (; image_line_cursor < offset_for_end_partial_bits; ++image_line_cursor, ++line_cursor) {
+			frame_buffer[line_cursor] = ~image->data[(i * image->width) / 8 + image_line_cursor];
+		}
+
+		if (num_end_partial_bits > 0) {
+			frame_buffer[line_cursor] = 
+				(frame_buffer[line_cursor] & ~end_partial_bit_mask) |
+				(~image->data[i * image->width + image_line_cursor] & end_partial_bit_mask);
+		}
+
+		cursor += info->fix.line_length;
+	}
+
 	cancel_delayed_work(&info->deferred_work);
 	schedule_delayed_work(&info->deferred_work, 3 * HZ);
 }
@@ -974,8 +1057,7 @@ static ssize_t epaper_27inch_write(struct fb_info *info, const char __user *buf,
 	if  (!err)
 		*ppos += count;
 
-	cancel_delayed_work(&info->deferred_work);
-	schedule_delayed_work(&info->deferred_work, 3 * HZ);
+	epaper_27inch_dpy_update(info->par);
 
 	return (err) ? err : count;
 }
@@ -1021,11 +1103,20 @@ static int epaper_27inch_fb_probe(struct spi_device *spi)
 	}
 
 	info = epaper->fb_info;
-	info->screen_base = (char __force __iomem *)video_memory;
+	info->screen_base = (u8 __force __iomem *)video_memory;
 	info->fbops = &epaper_27inch_ops;
 
 	info->fix = epaper_27inch_fix_screeninfo;
 	info->var = epaper_27inch_var_screeninfo;
+
+	info->var.red.length = 1;
+	info->var.red.offset = 0;
+	info->var.green.length = 1;
+	info->var.green.offset = 0;
+	info->var.blue.length = 1;
+	info->var.blue.offset = 0;
+
+	info->fix.smem_start = __pa(video_memory);
 	info->fix.smem_len = video_memory_size;
 	info->flags = FBINFO_FLAG_DEFAULT | FBINFO_VIRTFB;
 	info->fbdefio = &epaper_27inch_defio;
@@ -1035,8 +1126,12 @@ static int epaper_27inch_fb_probe(struct spi_device *spi)
 	par->info = info;
 	par->spi = spi;
 	par->shadow_video_memory = vzalloc(video_memory_size);
+	if (!par->shadow_video_memory) {
+		err = -ENOMEM;
+		goto out_dealloc_shadow_vmem;
+	}
+
 	memset(par->shadow_video_memory, 0xFF, video_memory_size);
-	// todo error
 
 	err = register_framebuffer(info);
 	if (err < 0)
@@ -1045,12 +1140,12 @@ static int epaper_27inch_fb_probe(struct spi_device *spi)
 	fb_info(info, "epaper_27inch frame buffer device, using %dK of video memory\n",
 		video_memory_size >> 10);
 
-	schedule_delayed_work(&info->deferred_work, epaper_27inch_defio.delay);
-
 	return 0;
 
 out_dealloc:
 	framebuffer_release(info);
+out_dealloc_shadow_vmem:
+	vfree(par->shadow_video_memory);
 out_dealloc_vmem:
 	vfree(video_memory);
 
