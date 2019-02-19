@@ -8,6 +8,7 @@
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/gpio.h>
+#include <linux/time.h>
 #include <linux/of_gpio.h>
 #include <linux/uaccess.h>
 #include <linux/spi/spi.h>
@@ -812,6 +813,9 @@ struct epaper_27inch_par {
 	struct fb_info *info;
 	unsigned char *shadow_video_memory;
 	bool is_updating;
+	struct timeval last_frame_write;
+	struct timeval last_frame_update;
+	struct mutex frame_lock;
 	struct mutex is_updating_lock;
 };
 
@@ -848,6 +852,9 @@ static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 
 	buf = (unsigned char __force *)par->info->screen_base;
 	old_frame = (unsigned char __force *)par->shadow_video_memory;
+
+	mutex_lock(&par->frame_lock);
+	do_gettimeofday(&par->last_frame_update);
 
 	need_update = false;
 	for (i = 0; i < EPD_NUM_PIXELS / 8; ++i) {
@@ -892,18 +899,17 @@ static void epaper_27inch_dpy_update(struct epaper_27inch_par *par)
 	}
 
 	memcpy(old_frame, buf, EPD_NUM_PIXELS / 8);
+	mutex_unlock(&par->frame_lock);
 
 	epaper_27inch_wait_until_idle(spi);
 
-	goto exit_unlock;
+	return;
 
 exit_err:
 	dev_err(&spi->dev, "Failed to update display. Error: %d\n", err);
 
 exit_unlock:
-	mutex_lock(&par->is_updating_lock);
-	par->is_updating = false;
-	mutex_unlock(&par->is_updating_lock);
+	mutex_unlock(&par->frame_lock);
 
 }
 
@@ -915,22 +921,29 @@ static void epaper_27inch_dpy_deferred_io(struct fb_info *info, struct list_head
 	spi = par->spi;
 
 	dev_warn(&spi->dev, "epaper_27inch_dpy_deferred_io\n");
-	mutex_lock(&par->is_updating_lock);
-	par->is_updating = true;
-	mutex_unlock(&par->is_updating_lock);
 
 	epaper_27inch_dpy_update(par);
 }
 
 static void epaper_27inch_update_delayed(struct fb_info *info) {
+	s64 last_frame_write_nanos;
+	s64 last_frame_update_nanos;
+	bool should_delay_work;
 	struct epaper_27inch_par *par = info->par;
 
-	mutex_lock(&par->is_updating_lock);
-	if (!par->is_updating) {
-		par->is_updating = true;
-		schedule_delayed_work(&info->deferred_work, 3 * HZ);
+	mutex_lock(&par->frame_lock);
+	last_frame_update_nanos = timeval_to_ns(&par->last_frame_update);
+	last_frame_write_nanos = timeval_to_ns(&par->last_frame_write);
+	should_delay_work = last_frame_write_nanos - last_frame_update_nanos <= (s64)3000000000;
+	mutex_unlock(&par->frame_lock);
+
+	if (should_delay_work) {
+		// Update was less than 3 sec ago, push back the update another half second.
+		mod_delayed_work(system_wq, &info->deferred_work, HZ/2);
+	} else {
+		// Last update was more than 3 sec ago, update immediately if one is not already in progress.
+		schedule_delayed_work(&info->deferred_work, 0);
 	}
-	mutex_unlock(&par->is_updating_lock);
 }
 
 static void epaper_27inch_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
@@ -940,7 +953,10 @@ static void epaper_27inch_fillrect(struct fb_info *info, const struct fb_fillrec
 	spi = par->spi;
 
 	dev_warn(&spi->dev, "epaper_27inch_fillrect\n");
+	mutex_lock(&par->frame_lock);
 	sys_fillrect(info, rect);
+	do_gettimeofday(&par->last_frame_write);
+	mutex_unlock(&par->frame_lock);
 	
 	epaper_27inch_update_delayed(info);
 }
@@ -953,7 +969,11 @@ static void epaper_27inch_copyarea(struct fb_info *info, const struct fb_copyare
 
 	dev_warn(&spi->dev, "epaper_27inch_copyarea\n");
 
+	mutex_lock(&par->frame_lock);
 	sys_copyarea(info, area);
+	do_gettimeofday(&par->last_frame_write);
+	mutex_unlock(&par->frame_lock);
+
 	epaper_27inch_update_delayed(info);
 }
 
@@ -974,15 +994,15 @@ static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image 
 	u8 *frame_buffer;
 	spi = par->spi;
 
-	dev_warn(&spi->dev, "epaper_27inch_imageblit\n");
+//	dev_warn(&spi->dev, "epaper_27inch_imageblit\n");
 
-	printk(KERN_INFO "dx: %d, dy: %d, width: %d, height: %d, fg_color: %x, bg_color: %x, depth: %d",
-		image->dx, image->dy, image->width, image->height, image->fg_color, image->bg_color, image->depth);
+	// printk(KERN_INFO "dx: %d, dy: %d, width: %d, height: %d, fg_color: %x, bg_color: %x, depth: %d",
+	// 	image->dx, image->dy, image->width, image->height, image->fg_color, image->bg_color, image->depth);
 
-	if (image->width == 8 && image->height == 8) {
-		printk(KERN_INFO "Image: %02x %02x %02x %02x %02x %02x %02x %02x", 
-		image->data[0], image->data[1], image->data[2], image->data[3], image->data[4], image->data[5], image->data[6], image->data[7]);
-	}
+	// if (image->width == 8 && image->height == 8) {
+	// 	printk(KERN_INFO "Image: %02x %02x %02x %02x %02x %02x %02x %02x", 
+	// 	image->data[0], image->data[1], image->data[2], image->data[3], image->data[4], image->data[5], image->data[6], image->data[7]);
+	// }
 
 	
 	frame_buffer = info->screen_base;
@@ -999,14 +1019,16 @@ static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image 
 	start_offset = ((image->dy * info->fix.line_length * 8) + image->dx) / 8;
 	cursor = start_offset;
 
-	printk(KERN_INFO "num_begin_partial_bits: %d", num_begin_partial_bits);
-	printk(KERN_INFO "begin_partial_bit_mask: %02x", begin_partial_bit_mask);
-	printk(KERN_INFO "num_end_partial_bits: %d", num_end_partial_bits);
-	printk(KERN_INFO "end_partial_bit_mask: %02x", end_partial_bit_mask);
-	printk(KERN_INFO "offset_for_end_partial_bits: %d", offset_for_end_partial_bits);
-	printk(KERN_INFO "start_offset: %d", start_offset);
+	// printk(KERN_INFO "num_begin_partial_bits: %d", num_begin_partial_bits);
+	// printk(KERN_INFO "begin_partial_bit_mask: %02x", begin_partial_bit_mask);
+	// printk(KERN_INFO "num_end_partial_bits: %d", num_end_partial_bits);
+	// printk(KERN_INFO "end_partial_bit_mask: %02x", end_partial_bit_mask);
+	// printk(KERN_INFO "offset_for_end_partial_bits: %d", offset_for_end_partial_bits);
+	// printk(KERN_INFO "start_offset: %d", start_offset);
 	
 	// Draw horizontal line by horizontal line, one byte at a time
+
+	mutex_lock(&par->frame_lock);
 	for (i = 0; i < image->height; ++i) {
 		line_cursor = cursor;
 
@@ -1032,6 +1054,8 @@ static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image 
 
 		cursor += info->fix.line_length;
 	}
+	do_gettimeofday(&par->last_frame_write);
+	mutex_unlock(&par->frame_lock);
 
 	epaper_27inch_update_delayed(info);
 }
@@ -1043,6 +1067,7 @@ static void epaper_27inch_imageblit(struct fb_info *info, const struct fb_image 
 static ssize_t epaper_27inch_write(struct fb_info *info, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
+	struct epaper_27inch_par *par = info->par;
 	unsigned long p = *ppos;
 	void *dst;
 	int err = 0;
@@ -1070,6 +1095,7 @@ static ssize_t epaper_27inch_write(struct fb_info *info, const char __user *buf,
 
 	printk(KERN_INFO "epaper_27inch_write: Writing %d bytes at offset %lu", count, p);
 
+	mutex_lock(&par->frame_lock);
 	dst = (void __force *) (info->screen_base + p);
 
 	if (copy_from_user(dst, buf, count))
@@ -1077,6 +1103,9 @@ static ssize_t epaper_27inch_write(struct fb_info *info, const char __user *buf,
 
 	if  (!err)
 		*ppos += count;
+
+	do_gettimeofday(&par->last_frame_write);
+	mutex_unlock(&par->frame_lock);
 
 	epaper_27inch_update_delayed(info);
 
@@ -1148,7 +1177,10 @@ static int epaper_27inch_fb_probe(struct spi_device *spi)
 	par->spi = spi;
 	par->shadow_video_memory = vzalloc(video_memory_size);
 	par->is_updating = false;
+	do_gettimeofday(&par->last_frame_write);
+	do_gettimeofday(&par->last_frame_update);
 	mutex_init(&par->is_updating_lock);
+	mutex_init(&par->frame_lock);
 	if (!par->shadow_video_memory) {
 		err = -ENOMEM;
 		goto out_dealloc_shadow_vmem;
@@ -1190,6 +1222,7 @@ static int epaper_27inch_fb_remove(struct spi_device *spi)
 		vfree((void __force *)par->shadow_video_memory);
 		framebuffer_release(info);
 		mutex_destroy(&par->is_updating_lock);
+		mutex_destroy(&par->frame_lock);
 	}
 
 	return 0;
